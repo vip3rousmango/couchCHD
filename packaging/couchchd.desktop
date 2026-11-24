@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=CouchCHD
+Comment=Compress and verify a disc image library
+Exec=couchchd
+Icon=couchchd
+Terminal=false
+Categories=Utility;Compression;

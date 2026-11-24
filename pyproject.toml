@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "couchchd"
+dynamic = ["version"]
+description = "Controller-first, verified CHD compression and reversible ROM library management"
+requires-python = ">=3.11"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [{ name = "viperousmango" }]
+readme = "README.md"
+dependencies = ["dbus-next>=0.2.3,<1; sys_platform == 'linux'"]
+
+[project.optional-dependencies]
+gui = ["PySide6-Essentials>=6.6,<7", "pygame-ce>=2.5,<3", "vdf>=3.4,<4"]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+couchchd = "couchchd.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "couchchd.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"couchchd.ui" = ["qml/*.qml", "assets/*.svg", "assets/*.vdf"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <title>CouchCHD</title>
+  <rect x="3" y="3" width="122" height="122" rx="28" fill="#10283a"/>
+  <circle cx="64" cy="58" r="41" fill="#e0f2f1"/>
+  <circle cx="64" cy="58" r="12" fill="#10283a"/>
+  <path d="m34 49 17 5m17-26-2 15m27 17-15-1" stroke="#63b9bd" stroke-width="4" stroke-linecap="round"/>
+  <path d="M20 76h13l9 15h44l9-15h13l-10 31H30z" fill="#5bd8a4" stroke="#10283a" stroke-width="4" stroke-linejoin="round"/>
+</svg>
