@@ -191,7 +191,9 @@ def convert(game: Game, output: Path, tool: Path, *, cancel: threading.Event, th
             _version(tool, work, cancel)
             source = _input(game, work, cancel)
             partial = work / (game.source.stem + '.chd.part')
-            flags = ['-hs', '2048'] if game.mode == 'createdvd' else []
+            # One widely supported lossless codec instead of trial-compressing
+            # each 2 KiB DVD hunk with MAME's entire default codec set.
+            flags = ['-hs', '2048', '-c', 'zlib'] if game.mode == 'createdvd' else []
             _run(tool, game.mode, '-i', source, '-o', partial, *flags, '-np', str(threads), cwd=work, cancel=cancel)
             _nonempty(partial)
             _verify(tool, partial, work, cancel)

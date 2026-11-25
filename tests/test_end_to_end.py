@@ -3,10 +3,12 @@
 import os
 import shutil
 from pathlib import Path
+import subprocess
 
 import pytest
 
 from couchchd.app import Backend
+from couchchd.converter import tool_path
 from couchchd.locking import library_lock
 
 
@@ -29,6 +31,22 @@ def test_locked_library_does_not_start_second_scan(tmp_path):
 
 real_chdman = pytest.mark.skipif(not (os.getenv('COUCHCHD_CHDMAN') or shutil.which('chdman')),
                                  reason='requires a real supported MAME chdman')
+
+
+@real_chdman
+def test_fast_dvd_preserves_every_iso_sector(tmp_path):
+    folder = tmp_path / 'psp'
+    folder.mkdir()
+    source = folder / 'disc.iso'
+    image = bytes(range(256)) * 128 + b'\x01CD001\x01' + bytes(2048 - 7) + bytes(range(128)) * 64
+    source.write_bytes(image)
+    os.utime(source, (1600000000, 1600000000))
+    result = Backend(tmp_path).run(systems={'psp'}, quarantine=False)
+    chd = source.with_suffix('.chd')
+    assert not result['errors'] and result['converted'] == [str(chd)], result
+    restored = tmp_path / 'restored.iso'
+    subprocess.run([tool_path(), 'extractdvd', '-i', chd, '-o', restored], check=True)
+    assert restored.read_bytes() == source.read_bytes() == image
 
 
 @real_chdman
