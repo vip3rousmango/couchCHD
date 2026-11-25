@@ -89,7 +89,7 @@ class Batch:
     def _prepare(self, job, work, stage, target, threads):
         context = cloud_ingest.stage(job.game, work, cancel=self.cancel) if stage else nullcontext(job.game)
         with context as game:
-            converter.convert(game, target, self.tool, cancel=self.cancel, threads=threads)
+            converter.convert(game, target, self.tool, cancel=self.cancel, threads=threads, progress=self.progress)
         job.game.assert_unchanged()
 
     def _publish(self, job, prepared):

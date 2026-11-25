@@ -60,10 +60,12 @@ def test_single_qml_window_handles_physical_actions(tmp_path):
         import sys
         import ctypes
         import pygame as pg
+        from threading import Event
         from pathlib import Path
         from PySide6.QtCore import QUrl
         from PySide6.QtGui import QGuiApplication
         from PySide6.QtQml import QQmlApplicationEngine
+        from PySide6.QtQuick import QQuickItem
         from PySide6.QtTest import QTest
         from couchchd.ui import bridge
         from couchchd.ui.gamepad import InputRouter
@@ -77,6 +79,29 @@ def test_single_qml_window_handles_physical_actions(tmp_path):
         assert len(engine.rootObjects()) == 1
         win = engine.rootObjects()[0]
         win.requestActivate()
+        # The status line must show the worker's queued update *during* a batch,
+        # not just after busy clears. No physical/virtual controller needed here.
+        release = Event()
+        message = "Verifying: My disc.iso (65.4%)"
+        def compress():
+            state._progress.emit(message)
+            release.wait(5)
+        state._work("Compressing discs", compress, lambda _: None)
+        try:
+            for _ in range(100):
+                QTest.qWait(20)
+                if any(item.isVisible() and item.property('text') == message
+                       for item in win.findChildren(QQuickItem)):
+                    break
+            else:
+                raise AssertionError('live status not visible in the QML window')
+            assert state.busy
+        finally:
+            release.set()
+        for _ in range(100):
+            QTest.qWait(20)
+            if not state.busy:
+                break
         pad.start()
         if sys.platform == 'win32':
             sdl = ctypes.CDLL(str(Path(pg.__file__).parent / 'SDL2.dll'))

@@ -12,8 +12,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+from collections import deque
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
+from . import hardware
 from .ledger import install_new
 from .scanner import FileLine, Game, inspect
 
@@ -43,20 +49,91 @@ def _cancelled(cancel: threading.Event) -> None:
         raise InterruptedError('Conversion cancelled; originals retained')
 
 
+@dataclass(frozen=True)
+class _Report:
+    text: str
+    truncated: bool
+    disk_full: bool
+    checksums_ok: bool
+
+
+_PERCENT = re.compile(rb'[\r\n](Compressing|Verifying), ([0-9]{1,3}(?:\.[0-9]{1,2})?)% complete')
+_SHA1 = re.compile(rb'[\r\n](Raw|Overall) SHA1 verification successful!(?=[\r\n])')
+_ERROR = re.compile(rb'[\r\n]Error:', re.I)
+_FULL = re.compile(rb'no space left|disk (?:is )?full|ENOSPC|not enough space', re.I)
+
+
+def _drain(pipe, command: str, updates: deque[str] | None) -> _Report:
+    # Info/help need a complete, bounded report. Other commands need only a
+    # diagnostic tail; never spool an hours-long progress stream to disk.
+    limit = 128 * 1024 if command in ('info', 'help') else 2048
+    tail = bytearray()
+    truncated = disk_full = error = False
+    checksums = set()
+    stage = b'Verifying' if command == 'verify' else b'Compressing'
+    overlap = b'\n'
+    while True:
+        chunk = pipe.read1(16 * 1024)
+        # All markers matched above are shorter than 128 bytes. Match across
+        # split writes, including CR-only updates and EOF with no last newline.
+        # Never accumulate an unterminated line.
+        data = overlap + (chunk or b'\n')
+        disk_full = disk_full or bool(_FULL.search(data))
+        if command == 'verify':
+            error = error or bool(_ERROR.search(data))
+            checksums.update(match[1] for match in _SHA1.finditer(data))
+        if updates is not None:
+            for match in _PERCENT.finditer(data):
+                if match.end() > len(overlap) and match[1] == stage and float(match[2]) <= 100:
+                    updates.append(match[2].decode('ascii'))
+        if not chunk:
+            break
+        overlap = data[-128:]
+        tail.extend(chunk)
+        if len(tail) > limit:
+            truncated = True
+            del tail[:-limit]
+    return _Report(tail.decode('utf-8', 'replace'), truncated, disk_full, len(checksums) == 2 and not error)
+
+
 def _run(tool: Path, *args: str | Path, cancel: threading.Event, cwd: Path,
-         returns: tuple[int, ...] = (0,)) -> str:
+         returns: tuple[int, ...] = (0,), progress: Callable[[str], None] | None = None,
+         disc: str = '') -> _Report:
     _cancelled(cancel)
-    # chdman progress uses carriage returns for hours at a time. Spill to a temporary
-    # file, not an undrained pipe or an unbounded in-memory buffer.
-    with tempfile.TemporaryFile() as log:
-        proc = subprocess.Popen([tool, *args], cwd=cwd, stdin=subprocess.DEVNULL, stdout=log,
-                                stderr=subprocess.STDOUT, start_new_session=os.name == 'posix')
+    command = str(args[0])
+    # One producer drains both streams, one consumer samples the latest value.
+    # A slow UI/terminal neither blocks the pipe reader nor builds up a queue.
+    updates = deque(maxlen=1) if progress is not None else None
+    title = f'{"Verifying" if command == "verify" else "Compressing"}: {disc}'
+    if progress is not None:
+        progress(title)
+        _cancelled(cancel)
+    sent = None
+    next_progress = next_thermal_check = float('-inf')
+    with ThreadPoolExecutor(max_workers=1) as reader, subprocess.Popen(
+            [tool, *args], cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, start_new_session=os.name == 'posix') as proc:
         try:
-            while proc.poll() is None:
-                if cancel.wait(.1):
-                    _cancelled(cancel)
-        finally:
-            if proc.poll() is None:
+            output = reader.submit(_drain, proc.stdout, command, updates)
+            # Don't reap a child until its writer closes. On POSIX a wrapper
+            # may exit first; retain the process group for safe cancellation.
+            while not output.done() or proc.poll() is None:
+                _cancelled(cancel)
+                if output.done():
+                    output.result()  # a broken reader must not leave a writer blocked
+                now = time.monotonic()
+                if sys.platform.startswith('linux') and now >= next_thermal_check:
+                    hardware.throttle_child(proc.pid)
+                    next_thermal_check = now + 1
+                if progress is not None and updates and now >= next_progress:
+                    latest = updates[-1]
+                    if latest != sent:
+                        progress(f'{title} ({latest}%)')
+                        sent, next_progress = latest, now + 1
+                cancel.wait(.1)
+            result = output.result()  # includes any final buffered checksums/errors
+        except BaseException:
+            if proc.returncode is None:
                 try:
                     if os.name == 'posix':
                         os.killpg(proc.pid, signal.SIGKILL)
@@ -65,32 +142,35 @@ def _run(tool: Path, *args: str | Path, cancel: threading.Event, cwd: Path,
                 except ProcessLookupError:
                     pass
                 proc.wait()
-        _cancelled(cancel)
-        log.seek(max(0, log.tell() - 128 * 1024))
-        result = log.read().decode('utf-8', 'replace')
+            raise
+    _cancelled(cancel)
     if proc.returncode not in returns:
-        detail = result.strip()[-1600:]
-        if re.search(r'no space left|disk (?:is )?full|ENOSPC|not enough space', result, re.I) or not shutil.disk_usage(cwd).free:
+        detail = result.text.strip()[-1600:]
+        if result.disk_full or not shutil.disk_usage(cwd).free:
             cancel.set()
             raise OSError(errno.ENOSPC, detail or 'No space left on device')
-        raise RuntimeError(f'chdman {args[0]} exited {proc.returncode}: {detail}')
+        raise RuntimeError(f'chdman {command} exited {proc.returncode}: {detail}')
+    if result.truncated and command in ('info', 'help'):
+        raise ValueError(f'chdman {command} report too large to validate')
+    if progress is not None and updates and updates[-1] != sent:
+        progress(f'{title} ({updates[-1]}%)')
     return result
 
 
 def _version(tool: Path, cwd: Path, cancel: threading.Event) -> None:
     # MAME prints its banner and returns 1 for the help command.
     banner = _run(tool, 'help', cwd=cwd, cancel=cancel, returns=(0, 1))
-    match = re.search(r'^chdman\b[^\n]*?\b(?:manager|version)\s+(\d+)\.(\d+)', banner, re.I | re.M)
+    match = re.search(r'^chdman\b[^\n]*?\b(?:manager|version)\s+(\d+)\.(\d+)', banner.text, re.I | re.M)
     if not match or tuple(map(int, match.groups())) < (0, 256):
         raise RuntimeError('chdman 0.256 or later is required')
 
 
-def _verify(tool: Path, chd: Path, cwd: Path, cancel: threading.Event) -> None:
-    report = _run(tool, 'verify', '-i', chd, cwd=cwd, cancel=cancel)
+def _verify(tool: Path, chd: Path, cwd: Path, cancel: threading.Event, *,
+            progress: Callable[[str], None] | None = None, disc: str = '') -> None:
+    report = _run(tool, 'verify', '-i', chd, cwd=cwd, cancel=cancel, progress=progress, disc=disc)
     # Some MAME releases *return zero* for a mismatch or missing checksums. Require
     # positive confirmation of both data and metadata, not merely an exit status.
-    if ('Raw SHA1 verification successful!' not in report or 'Overall SHA1 verification successful!' not in report
-            or re.search(r'(?:^|[\r\n])Error:', report, re.I)):
+    if not report.checksums_ok:
         raise ValueError('CHD checksum verification did not confirm both raw and overall SHA1')
 
 
@@ -176,7 +256,8 @@ def _sync(path: Path) -> None:
         os.fsync(file.fileno())
 
 
-def convert(game: Game, output: Path, tool: Path, *, cancel: threading.Event, threads: int) -> None:
+def convert(game: Game, output: Path, tool: Path, *, cancel: threading.Event, threads: int,
+            progress: Callable[[str], None] | None = None) -> None:
     if threads < 1:
         raise ValueError('At least one compression thread is required')
     _cancelled(cancel)
@@ -194,12 +275,13 @@ def convert(game: Game, output: Path, tool: Path, *, cancel: threading.Event, th
             # One widely supported lossless codec instead of trial-compressing
             # each 2 KiB DVD hunk with MAME's entire default codec set.
             flags = ['-hs', '2048', '-c', 'zlib'] if game.mode == 'createdvd' else []
-            _run(tool, game.mode, '-i', source, '-o', partial, *flags, '-np', str(threads), cwd=work, cancel=cancel)
+            _run(tool, game.mode, '-i', source, '-o', partial, *flags, '-np', str(threads),
+                 cwd=work, cancel=cancel, progress=progress, disc=game.source.name)
             _nonempty(partial)
-            _verify(tool, partial, work, cancel)
+            _verify(tool, partial, work, cancel, progress=progress, disc=game.source.name)
             flags = ['-v'] if game.mode == 'createcd' else []  # Never compare truncated track metadata.
             report = _run(tool, 'info', '-i', partial, *flags, cwd=work, cancel=cancel)
-            _match(game, report)
+            _match(game, report.text)
             _sync(partial)
             game.assert_unchanged()
             _cancelled(cancel)
@@ -246,7 +328,7 @@ def extract(chd: Path, dest: Path, tool: Path) -> Path:
         work = Path(tmp)
         _version(tool, work, cancel)
         _verify(tool, chd, work, cancel)
-        report = _run(tool, 'info', '-i', chd, '-v', cwd=work, cancel=cancel)
+        report = _run(tool, 'info', '-i', chd, '-v', cwd=work, cancel=cancel).text
         if not _TRACK.search(report):
             raise ValueError('Extract to BIN/CUE requires a CD or GD-ROM CHD')
         # A constant basename prevents chdman's %t filename templating from
