@@ -257,7 +257,7 @@ def test_device_rendered_preview_art_migrates_in_both_flows(profile, action):
     original = file.read_bytes()
     # The rest of the suite may own a QCoreApplication, which cannot be
     # upgraded to a QGuiApplication.
-    env = dict(os.environ, QT_QPA_PLATFORM='offscreen', PYTHONPATH=str(Path(steam.__file__).parents[2]))
+    env = dict(os.environ, QT_QPA_PLATFORM='offscreen', PYTHONPATH=os.pathsep.join(sys.path))
     subprocess.run([sys.executable, __file__, action.__name__, str(launcher), str(file.parent / 'grid'), str(appid)],
                    check=True, env=env, timeout=30)
     entry = vdf.binary_loads(file.read_bytes())['shortcuts']['7']
