@@ -83,3 +83,16 @@ def test_menu_failure_does_not_hide_installed_gui(target, graphical):
     assert 'menu rejected' in result.stderr
     assert ('GUI' in result.stdout) == graphical
     assert (result.returncode == 0) == graphical
+
+
+def test_exec_mask_stops_arm_setup_before_download(target):
+    tmp, env, base, _ = target
+    tools = tmp / 'tools'
+    executable(tools / 'uname', 'case $1 in -s) echo Linux;; -m) echo aarch64;; esac')
+    # A permission-synthesizing filesystem can accept chmod but return no x bits.
+    executable(tools / 'chmod', 'exec /bin/chmod 600 "$2"')
+    executable(tools / 'curl', 'echo unexpected-download >&2; exit 22')
+    result = subprocess.run(['sh', SCRIPTS / 'install-device.sh'], cwd=tmp, env=env, capture_output=True, text=True)
+    assert result.returncode and 'execute permission' in result.stderr
+    assert str(base) in result.stderr and 'unexpected-download' not in result.stderr
+    assert not (base / 'run-couchchd').exists() and not list((base / 'builds').iterdir())

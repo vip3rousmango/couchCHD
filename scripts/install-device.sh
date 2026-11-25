@@ -36,14 +36,46 @@ valid_digest() {
     [ "${#1}" = 64 ]
 }
 regular_executable() { [ ! -L "$1" ] && [ -f "$1" ] && [ -x "$1" ]; }
+check_executable() {
+    [ ! -L "$1" ] || fail "Refusing linked executable: $1"
+    [ -f "$1" ] || fail "Missing regular file: $1"
+    [ -x "$1" ] || fail "No execute permission on $1. Check the install volume's mount options and file mode."
+}
+check_exec_volume() {
+    # Probe on builds/ itself. A root login or successful chmod does not prove
+    # execution is allowed (e.g. noexec, or a filesystem masking execute bits).
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$tmp/run"
+    chmod 755 "$tmp/run" || fail "Cannot grant execute permission under $base/builds."
+    if [ ! -x "$tmp/run" ] || ! "$tmp/run"; then
+        if [ -r /proc/self/mountinfo ]; then
+            # Report only the deepest covering mount and permission flags,
+            # not remote names, credentials or unrelated mount options.
+            awk -v path="$(CDPATH='' cd -P "$tmp" && pwd -P)" '
+              {
+                mp = $5; gsub(/\\040/, " ", mp)
+                if ((mp == "/" || path == mp || index(path, mp "/") == 1) && length(mp) >= depth) {
+                    for (i=7; i<=NF && $i!="-"; i++) {}
+                    depth=length(mp); mount=mp; fs=$(i+1); flags=""
+                    n=split($6 "," $(i+3), opt, ",")
+                    for (j=1; j<=n; j++) if (opt[j] ~ /^(noexec|showexec|ro|(fmask|umask)=[0-7]+)$/)
+                        flags=flags " " opt[j]
+                }
+              }
+              END { if (depth) printf "CouchCHD: Install mount: %s (%s)%s\n", mount, fs, flags }
+            ' /proc/self/mountinfo >&2 || :
+        fi
+        fail "No usable execute permission under $base/builds. Check for noexec or masked execute bits on the install volume. No build activated."
+    fi
+}
 check_build() {
-    [ ! -L "$1" ] && [ -d "$1" ] && regular_executable "$1/run" ||
-        fail "Missing or unsafe build at $1."
+    [ ! -L "$1" ] && [ -d "$1" ] || fail "Missing or linked build directory: $1"
+    check_executable "$1/run"
     if [ "$arch" = x86_64 ]; then
-        regular_executable "$1/$asset" || fail 'Missing or unsafe AppImage.'
+        check_executable "$1/$asset"
     else
-        [ ! -L "$1/couchchd" ] && regular_executable "$1/couchchd/launch-recalbox.sh" &&
-            regular_executable "$1/couchchd/couchchd" || fail 'Missing or unsafe ARM bundle.'
+        [ ! -L "$1/couchchd" ] && [ -d "$1/couchchd" ] || fail "Missing or linked ARM bundle directory: $1/couchchd"
+        check_executable "$1/couchchd/launch-recalbox.sh"
+        check_executable "$1/couchchd/couchchd"
     fi
 }
 check_update_source() {
@@ -139,6 +171,8 @@ install() {
     elif [ -L "$launcher" ] || { [ -e "$launcher" ] && { [ ! -f "$launcher" ] || ! grep -Fqx '# CouchCHD managed launcher' "$launcher"; }; }; then
         fail "Will not replace unmanaged $launcher"
     fi
+    tmp=$(mktemp -d "$base/builds/.setup.XXXXXX")
+    check_exec_volume
     case $transport in
         github)
             release=https://github.com/vip3rousmango/couchCHD/releases/download/$release_tag
@@ -151,7 +185,6 @@ install() {
         digest=$(printf '%s\n' "$manifest" | awk -v f="$asset" 'NF == 2 && $2 == f {print $1}')
     fi
     valid_digest "$digest" || fail 'Invalid or missing SHA-256 digest.'
-    tmp=$(mktemp -d "$base/builds/.setup.XXXXXX")
     case $transport in
         github) fetch -o "$tmp/download" "$release/$asset" || fail 'Release download failed; previous installation unchanged.' ;;
         ssh) ssh -n "$host" "cat '$prefix/$asset'" > "$tmp/download" ;;
