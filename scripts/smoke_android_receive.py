@@ -41,8 +41,14 @@ def tap(*names, kind=None):
     adb('shell', 'input', 'tap', str((left + right) // 2), str((top + bottom) // 2))
 
 
+def screenshot(directory, name):
+    with (directory / name).open('wb') as shot:
+        subprocess.run(['adb', 'exec-out', 'screencap', '-p'], stdout=shot, timeout=10, check=True)
+
+
 def smoke():
     with tempfile.TemporaryDirectory() as tmp:
+        evidence = Path(os.environ.get('RUNNER_TEMP', tmp))
         root = Path(tmp) / 'roms'
         psx = root / 'psx'
         discs = psx / '.chd_discs'
@@ -54,9 +60,15 @@ def smoke():
         sender = start_sender(root, ['psx/Pair.m3u'], 'android-t618', players=['pcsx-rearmed'])
         try:
             adb('shell', 'am', 'start', '-W', '-n', 'io.github.vip3rousmango.couchchd.receiver/.ReceiverActivity')
+            for label in ('Sender', 'This handheld', 'Not paired', 'Find sender'):
+                locate(label)
+            screenshot(evidence, 'receiver-start.png')
             # The emulator's NAT doesn't forward LAN broadcasts. Use the supported
             # host-address fallback: discovery, pinning and data still go over IP.
-            tap('Enter host IP')
+            # Enter non-touch mode and navigate the pinned actions as on a handheld.
+            adb('shell', 'input', 'keyevent', 'KEYCODE_DPAD_LEFT', 'KEYCODE_DPAD_LEFT', 'KEYCODE_DPAD_RIGHT')
+            assert locate('Enter host IP')['focused'] == 'true'
+            adb('shell', 'input', 'keyevent', 'KEYCODE_BUTTON_A')
             tap(kind='android.widget.EditText')
             adb('shell', 'input', 'text', sender.address.split(':')[0])
             adb('shell', 'input', 'keyevent', '66')
@@ -64,6 +76,8 @@ def smoke():
             locate('Codes match')
             assert sender.pair_code, 'No candidate on sender'
             locate(sender.pair_code)
+            assert sender.transfer['phase'] == 'pairing' and sender.transfer['device']
+            screenshot(evidence, 'receiver-pairing.png')
             sender.approve()
             tap('Codes match')
             tap('Choose folder')
@@ -85,9 +99,7 @@ def smoke():
             print('Android 12: host and receiver codes match; SAF folder grant, verified disc and playlist readback passed.')
         finally:
             sender.close()
-            dest = Path(os.environ.get('RUNNER_TEMP', tmp)) / 'receiver-screen.png'
-            with dest.open('wb') as shot:
-                subprocess.run(['adb', 'exec-out', 'screencap', '-p'], stdout=shot, timeout=10)
+            screenshot(evidence, 'receiver-screen.png')
 
 
 if __name__ == '__main__':

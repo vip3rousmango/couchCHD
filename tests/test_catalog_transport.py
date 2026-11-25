@@ -157,3 +157,47 @@ def test_real_configured_remote_and_independent_digest(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match='SHA-256 changed'):
         transport.pull_game(location, 'psx/One.m3u', dest, change_remote)
     assert not list((dest / 'psx').iterdir()) and set(dest.iterdir()) == {dest / 'psx'}
+
+
+@pytest.mark.parametrize('remote', [False, True])
+def test_recursive_metadata_scan_never_opens_payloads(tmp_path, monkeypatch, remote):
+    source = tmp_path / 'home'
+    put(source, 'Master/Redump/psp/Demo.zip', b'not unpacked during discovery')
+    put(source, 'Master/Redump/psp/Demo.iso', b'not validated during discovery')
+    put(source, 'Master/Redump/psp/Game.cso', b'not hashed during discovery')
+    put(source, 'Unknown/Disc.chd', b'unknown platform')
+    put(source, 'Master/Redump/psp/Skip.rar', b'unsupported input')
+    put(source, 'BIOS/psp/Skip.iso', b'firmware')
+    put(source, '.private/psp/Skip.iso', b'hidden')
+    (source / 'alias').symlink_to(source / 'Master', target_is_directory=True)
+    if remote:
+        if not shutil.which('rclone'):
+            pytest.skip('rclone is optional')
+        config = put(tmp_path, 'rclone.conf', b'[server]\ntype = local\n')
+        monkeypatch.setenv('RCLONE_CONFIG', str(config))
+    def unexpected_read(*args):
+        pytest.fail('Directory scan opened a game payload')
+    monkeypatch.setattr(transport._Remote if remote else transport._Mounted, 'stream', unexpected_read)
+    snapshot = transport.discover('server:' + source.as_posix() if remote else source)
+    assert (snapshot.directories, snapshot.platform_folders, snapshot.unplaced, snapshot.unsupported) == (5, 1, 1, 1)
+    assert [(g.relative, g.kind) for g in snapshot.games] == [
+        ('Master/Redump/psp/Demo.iso', 'original'), ('Master/Redump/psp/Demo.zip', 'original'),
+        ('Master/Redump/psp/Game.cso', 'output')]
+
+
+def test_wrapped_playlist_preserves_references_and_requires_unambiguous_destination(tmp_path):
+    source, dest = tmp_path / 'archive', tmp_path / 'device'
+    game = 'master/roms/psx/RPG.m3u'
+    put(source, game, b'.chd_discs/One.chd\n')
+    put(source, 'master/roms/psx/.chd_discs/One.chd', b'only disc')
+    (dest / 'PS1').mkdir(parents=True)
+    (dest / 'psx').mkdir()
+    with pytest.raises(ValueError, match='Multiple psx folders'):
+        transport.pull_game(source, game, dest)
+    assert not list((dest / 'PS1').iterdir()) and not list((dest / 'psx').iterdir())
+    (dest / 'psx').rmdir()
+    track, playlist = transport.pull_game(source, game, dest)
+    assert playlist == dest / 'PS1/RPG.m3u'
+    assert track == playlist.parent / playlist.read_text().strip()
+    assert track.read_bytes() == b'only disc'
+    assert not (dest / 'master').exists()

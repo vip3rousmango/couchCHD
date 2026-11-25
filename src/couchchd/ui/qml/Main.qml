@@ -114,7 +114,7 @@ ApplicationWindow {
                         TapHandler { onTapped: library.switchTab(tab.index) }
                         Text {
                             id: tabTitle; anchors.fill: parent; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter
-                            text: window.compact ? ["Library", "Systems", "M3U", "NAS / Cloud", "History"][tab.index] : tab.modelData
+                            text: window.compact ? ["Dashboard", "Systems", "M3U", "Libraries", "History"][tab.index] : tab.modelData
                             elide: Text.ElideRight; font.pixelSize: 22 * window.u
                             color: tab.index === library.section ? "#e1f3b4" : "#b7c4b8"
                             font.weight: tab.index === library.section ? Font.DemiBold : Font.Normal
@@ -148,8 +148,8 @@ ApplicationWindow {
                 Layout.fillWidth: true; Layout.topMargin: 7 * window.u; Layout.bottomMargin: 4 * window.u; spacing: 22 * window.u
                 Text { text: library.summary; color: "#d9ebbe"; font.pixelSize: 21 * window.u; font.weight: Font.DemiBold }
                 Item { Layout.fillWidth: true }
-                Text { text: library.space + " free in library"; color: "#d3dbcf"; font.pixelSize: 21 * window.u }
-                Text { visible: !window.compact || window.width >= 840; text: "Compression difference: " + library.savings; color: "#d3dbcf"; font.pixelSize: 21 * window.u }
+                Text { visible: library.space !== "—" && library.section !== 3; text: library.space + " free in library"; color: "#d3dbcf"; font.pixelSize: 21 * window.u }
+                Text { visible: library.savings !== "—" && library.section !== 3 && (!window.compact || window.width >= 840); text: "Compression difference: " + library.savings; color: "#d3dbcf"; font.pixelSize: 21 * window.u }
             }
             Rectangle {
                 Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 40
@@ -213,6 +213,10 @@ ApplicationWindow {
                         font.pixelSize: 33 * window.u; font.weight: Font.DemiBold; color: "#f2f5e8"
                     }
                     Command { label: "Back"; glyph: router.glyphs[1]; compact: true; unit: window.u; onActivated: window.route("back") }
+                }
+                TransferLink {
+                    visible: library.modal.kind === "pack_wifi"; Layout.fillWidth: true
+                    info: library.transferView; unit: window.u
                 }
                 Flickable {
                     id: bodyScroll; Layout.fillWidth: true

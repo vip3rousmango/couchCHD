@@ -23,6 +23,13 @@ Rectangle {
         anchors.leftMargin: 18 * cell.unit; anchors.rightMargin: 18 * cell.unit
         anchors.verticalCenter: parent.verticalCenter
         spacing: 20 * cell.unit
+        Image {
+            readonly property string action: cell.entry.key
+            visible: action === "tool_export" || action === "catalog_open"
+            source: !visible ? "" : action === "tool_export" ? "../assets/handheld.svg" : "../assets/library-drive.svg"
+            Layout.preferredWidth: 44 * cell.unit; Layout.preferredHeight: 38 * cell.unit
+            fillMode: Image.PreserveAspectFit
+        }
         ColumnLayout {
             Layout.fillWidth: true
             spacing: 2 * cell.unit

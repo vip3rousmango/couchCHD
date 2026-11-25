@@ -10,6 +10,7 @@ from PySide6.QtCore import QTimer
 from .wifi_firewall import HomeFirewall
 
 from .. import handheld, handheld_profiles, hardware, scanner
+from ..catalog import Catalog
 from ..app import Backend
 from .presentation import row, size
 
@@ -36,6 +37,7 @@ class LibraryTools:
         self._load_profile_settings()
         self.repeat_note = ''
         self._wifi_stop = None
+        self.transfer = {}
         self._wifi_timer = QTimer(bridge)
         self._wifi_timer.setInterval(200)
         self._wifi_timer.timeout.connect(self._refresh_wifi)
@@ -74,6 +76,11 @@ class LibraryTools:
     @property
     def _platform_folder(self):
         return self.profile['destination'] == 'platform'
+
+    @property
+    def _android(self):
+        key = self.profile['id']
+        return key.startswith('android-') or key in (handheld_profiles.DEFAULT_PROFILE, 'gamma-core')
 
     def _profiles_menu(self):
         body = ('Saved profile unavailable. Choose your handheld and its current firmware.' if self.profile_missing
@@ -140,6 +147,10 @@ class LibraryTools:
             return self._source_menu(key.removeprefix('tool_'))
         if key in ('tool_health_here', 'tool_export_here'):
             return self.open_source('health' if key == 'tool_health_here' else 'export', ui.backend.root)
+        if key == 'tool_saved':
+            return ui._work('Opening saved libraries', lambda: Catalog().sources(), self._saved_sources)
+        if key == 'tool_saved_source':
+            return self.open_source('export', Path(arg))
         if key in ('tool_health_browse', 'tool_export_browse'):
             return ui._pick('health_source' if key == 'tool_health_browse' else 'export_source')
         if key == 'tool_profiles':
@@ -223,7 +234,7 @@ class LibraryTools:
             self._plan_setup()
         elif kind == 'pack_profiles' and self.profile_missing:
             self.ui._hide()
-        elif kind in ('pack_profiles', 'pack_players', 'pack_info', 'pack_system'):
+        elif kind in ('pack_profiles', 'pack_players', 'pack_info', 'pack_system', 'pack_saved'):
             self._source_menu('export')
         elif kind in ('pack_filter', 'pack_changed', 'pack_wifi'):
             self.show_pack()
@@ -275,24 +286,34 @@ class LibraryTools:
             rows.append(row('note', 'About these estimates', plan['note']))
         self.ui._show('plan_preview', 'Space plan', body, rows)
 
+    def _saved_sources(self, sources):
+        rows = [row('tool_saved_source', s.name, s.location, 'Choose games', s.location)
+                for s in sources if Path(s.location).is_absolute()]
+        body = ('Choose a mounted home library. CouchCHD looks for games that your selected players can open.'
+                if rows else 'No mounted libraries saved. Browse a folder now or register one under Home libraries.')
+        rows.append(row('tool_export_browse', 'Browse a folder instead'))
+        self.ui._show('pack_saved', 'Choose a home library', body, rows)
+
     def _source_menu(self, action):
         if action == 'export':
             if self.profile_missing:
                 return self._profiles_menu()
             version = next((p['label'] for p in self.profile['players'] if p.get('group') and p['id'] in self.players),
                            self.profile['firmware'])
-            rows = [row('tool_profiles', 'Handheld and firmware', self.profile['label']),
-                    row('tool_players', 'Players and formats', version, len(self.players))]
+            rows = []
             if self.players:
                 if self.last_pack:
-                    rows.insert(0, row('tool_pack_repeat', 'Sync last selection', self.last_pack['source'], 'Review'))
+                    rows.append(row('tool_pack_repeat', 'Sync last selection', self.last_pack['source'], 'Review'))
                 if self.ui.backend is not None:
                     rows.append(row('tool_export_here', 'Use current library', self.ui.location))
+                rows.append(row('tool_saved', 'Choose from home libraries', 'Use a saved disk or mounted network folder.'))
                 rows.append(row('tool_export_browse', 'Browse a source folder', 'Mounted library or system folder.'))
+            rows.append(row('tool_players', 'Players and formats', version, len(self.players)))
+            rows.append(row('tool_profiles', 'Handheld and firmware', self.profile['label']))
             rows.append(row('tool_profile_info', 'About this profile', 'Folder layout, evidence and playback checks.'))
-            body = (('Choose games, then send over Wi-Fi or copy to a connected card.'
-                     if self.profile['id'] == 'android-t618' else
-                     'Choose games, then confirm the connected card. This copies files; it does not install an app.')
+            body = (('Choose a game source below. On the next screen, select a game and choose Send over Wi-Fi.'
+                     if self._android else
+                     'Choose a game source, then select games to copy to your connected card.')
                     if self.players else 'No player selected. Choose the emulator installed on your handheld to see eligible games.')
             return self.ui._show('export_source', 'Sync to handheld', body, rows)
         rows = []
@@ -371,14 +392,14 @@ class LibraryTools:
         if self.repeat_note:
             body += '\n' + self.repeat_note
         if self.catalog:
-            if self.selected:
-                rows.append(row('tool_pack_dest', 'Choose destination folder', self.folder_hint, 'Browse'))
-            else:
-                # Keep game and bulk rows in place when the first title is selected with a controller.
-                rows.append(row('note', 'Select games below', 'Then choose where to copy them.'))
-            if self.profile['id'] == 'android-t618':
-                rows.append(row('tool_wifi' if self.selected else 'note', 'Send over Wi-Fi',
-                                'Receive on Android without removing the SD card.' if self.selected else 'Select a game first.'))
+            chosen_systems = {g['system'] for g in self.catalog if g['path'] in self.selected}
+            if self._android:
+                wifi_ready = len(chosen_systems) == 1
+                rows.append(row('tool_wifi' if wifi_ready else 'note', 'Send over Wi-Fi',
+                                'Open CouchCHD Receive on your handheld.' if wifi_ready else
+                                'Select games from just one platform.' if chosen_systems else 'Select a game below to start pairing.'))
+            rows.append(row('tool_pack_dest' if self.selected else 'note', 'Copy to a mounted folder',
+                            self.folder_hint if self.selected else 'Select games first. Use this for a card reader or local export.'))
             if len(self.catalog_systems) > 1:
                 rows.append(row('tool_filter', 'Change system' if self._platform_folder else 'Show games', '',
                                 scanner.SYSTEM_LABELS.get(self.filter, 'All systems')))
@@ -404,7 +425,8 @@ class LibraryTools:
         allow = self._wifi_allow = Event()
         firewall_updates = SimpleQueue()
         commands = self._wifi_commands = SimpleQueue()
-        self._wifi_screen('', '', 'Preparing selected files…', '', '', reset=True)
+        self._wifi_screen('', '', 'Preparing the selected games. You can go back to cancel.', '', '',
+                          {'phase': 'preparing'}, reset=True)
 
         def manage_firewall(address):
             firewall = HomeFirewall.discover(address)
@@ -448,7 +470,7 @@ class LibraryTools:
                         network, firewall_note = firewall_updates.get()
                     closed = session.closed
                     current = ('' if closed else session.address, '' if approved or closed else session.pair_code,
-                               session.status, '' if closed else network, '' if closed else firewall_note)
+                               session.status, '' if closed else network, '' if closed else firewall_note, session.transfer)
                     if current != previous:
                         updates.put(current)
                         previous = current
@@ -456,7 +478,7 @@ class LibraryTools:
                         break
                     stop.wait(.2)
             except Exception as exc:
-                updates.put(('', '', f'Cannot send: {exc}. Go back to try again.', '', ''))
+                updates.put(('', '', f'Cannot send: {exc}. Go back to try again.', '', '', {'phase': 'error'}))
             finally:
                 stop.set()
                 if session is not None:
@@ -476,35 +498,49 @@ class LibraryTools:
         if latest is not None:
             self._wifi_screen(*latest, reset=False)
 
-    def _wifi_screen(self, address, code, status, network, firewall_note, *, reset):
-        system = scanner.SYSTEM_LABELS[self.filter]
-        rows = [row('back', 'Stop sending and go back')]
-        rows.extend([
-            row('note', '1. Install CouchCHD Receive on Android', 'vip3rousmango.github.io/couchCHD/receive'),
-            row('note', '2. Join the same Wi-Fi and tap Find', 'Open CouchCHD Receive on the handheld.'),
-            row('note', '3. Compare the codes', 'If they match, approve here. If not, stop sending.'),
-            row('note', f'4. Choose your {system} folder on Android', 'Use the existing game folder, not the whole SD card.')])
+    def _wifi_screen(self, address, code, status, network, firewall_note, sample, *, reset):
+        phase = sample['phase']
+        sent, total = sample.get('sent', 0), sample.get('total', 0)
+        rate = sample.get('rate', 0)
+        view = dict(phase=phase, address=address, peer=sample.get('peer', ''), device=sample.get('device', ''),
+                    filename=sample.get('file', ''), fraction=sent / total if total else 0,
+                    amount=f'{size(sent)} / {size(total)}' if total else '',
+                    speed=f'{size(rate)}/s' if rate and phase == 'sending' else '')
+        if view != self.transfer:
+            self.transfer = view
+            self.ui.transferChanged.emit()
+        new_candidate = bool(code) and (reset or self._wifi_controls[0] != code)
+        controls = (code, status, phase, network, firewall_note)
+        if not reset and controls == self._wifi_controls:
+            return  # Do not rebuild the controller's focused list on every sample.
+        self._wifi_controls = controls
+        ended = phase in ('closed', 'complete', 'error')
+        rows = [row('back', 'Return to games' if ended else 'Stop sending and go back')]
+        if phase in ('waiting', 'preparing'):
+            rows.append(row('note', 'Need the Android app?', 'vip3rousmango.github.io/couchCHD/receive'))
         if network:
             rows.append(row('tool_wifi_firewall', 'Allow on home network',
                             f'On trusted Wi-Fi only: allow discovery and transfer from {network} for up to 10 minutes.'))
         elif firewall_note:
             rows.append(row('note', 'Host firewall', firewall_note))
-        else:
-            rows.append(row('note', 'Can’t find this host?', 'Use home Wi-Fi, not a guest network. Try the host IP in Receive.'))
+        elif phase == 'waiting':
+            rows.append(row('note', 'Can’t find this computer?', 'Use the same home network, or tap Enter host IP in Receive.'))
         if code:
             rows.insert(1, row('tool_wifi_approve', f'Approve {code}', 'Only if the same code appears on your handheld.', '', code))
         body = status
-        if address:
-            body += f'\nHost: {address}'
+        if phase == 'complete':
+            body = 'Verified on the handheld. In Daijishō, open the platform and choose Sync.'
         if code:
             body += f'\nComparison code: {code}'
-        self.ui._show('pack_wifi', 'Send over Wi-Fi', body, rows, reset=reset)
+        self.ui._show('pack_wifi', 'Send over Wi-Fi', body, rows, reset=reset or new_candidate)
 
     def stop_wifi(self):
         if self._wifi_stop is not None:
             self._wifi_stop.set()
             self._wifi_timer.stop()
             self._wifi_stop = None
+            self.transfer = {}
+            self.ui.transferChanged.emit()
 
     def export_to(self, dest, *, previous=False):
         origin = self.origin

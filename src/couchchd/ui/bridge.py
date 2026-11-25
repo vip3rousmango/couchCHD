@@ -20,7 +20,7 @@ from .library_tools import LibraryTools
 from .presentation import _when, row, size
 
 PRESETS = {'silent': 'Handheld Silent', 'balanced': 'Balanced', 'docked': 'Docked Max'}
-TITLES = ['Dashboard', 'Systems', 'Multi-disc & M3U', 'NAS / Cloud', 'History & backups']
+TITLES = ['Dashboard', 'Systems', 'Multi-disc & M3U', 'Libraries & devices', 'History & backups']
 PSP_FORMATS = {
     'chd': 'CHD · PPSSPP 1.17 or newer',
     'cso': 'CSO · Also works with older PPSSPP versions',
@@ -212,6 +212,7 @@ class Bridge(QObject):
     _item = Signal(object)
     _space = Signal(object)  # bytes may exceed Qt's signed 32-bit int
     queueChanged = Signal()
+    transferChanged = Signal()
 
     def __init__(self, root: Path | None):
         super().__init__()
@@ -271,6 +272,9 @@ class Bridge(QObject):
         self._item.connect(self._queue.update_item, Qt.ConnectionType.QueuedConnection)
         self._space.connect(self._set_space, Qt.ConnectionType.QueuedConnection)
 
+    @Property('QVariantMap', notify=transferChanged)
+    def transferView(self): return self.tools.transfer
+
     @Property(QObject, constant=True)
     def queueModel(self): return self._queue
 
@@ -317,7 +321,7 @@ class Bridge(QObject):
     def summary(self): return self._summary
 
     @Property(str, notify=changed)
-    def location(self): return str(self.root) if self.root else 'No library selected'
+    def location(self): return str(self.root) if self.root else 'No conversion folder selected'
 
     @Property(str, notify=statusChanged)
     def status(self): return self._status
@@ -492,10 +496,11 @@ class Bridge(QObject):
         primary = 'Start batch' if selected else 'Scan library'
         self._summary = f'{len(selected)} of {len(eligible)} selected'
         if self.tab == 0:
-            self._subtitle = 'Review sources and their output formats before conversion.'
+            self._subtitle = 'Send games to a handheld, browse your home libraries, or compress originals.'
             if self.backend is None:
                 primary = 'Choose folder'
-                rows.append(row('library', 'Choose a ROM library', 'Select the folder that contains psx, dreamcast, or other system folders.'))
+                self._summary = 'Library tools'
+                rows.append(row('library', 'Choose a conversion folder', 'Select a writable ROM library for compression. Home libraries can stay read-only.'))
             else:
                 rows.append(row('filter', self.filter, 'Change library view', 'View'))
                 if self.filter == 'Queue':
@@ -529,9 +534,10 @@ class Bridge(QObject):
                     if len(rows) == 1:
                         rows.append(row('scan', 'No matching issues', 'The last scan did not flag files in this view.', 'Rescan'))
             rows[0:0] = [
+                row('tool_export', 'Sync to handheld', 'Send games over Wi-Fi or copy them to a card.', 'Choose games'),
+                row('catalog_open', 'Home libraries', 'Find ready games and originals across your saved folders.', 'Browse'),
                 row('tool_plan', 'Make room on this card', 'Choose a space goal and preview the batch.', 'Plan'),
                 row('tool_health', 'Library health check', 'Find problems and see what to do next.', 'Check'),
-                row('tool_export', 'Sync to handheld', 'Choose games for your handheld’s firmware and player.', 'Choose'),
             ]
             if self.backend is not None:
                 rows.append(row('scan', 'Scan library again', str(self.root)))
@@ -554,10 +560,11 @@ class Bridge(QObject):
             if not rows:
                 rows.append(row('scan', 'No playlists in this library', 'Convert a complete numbered CHD set for one of the supported systems.', 'Scan'))
         elif self.tab == 3:
-            self._summary = f'{len(self.enabled_systems)} systems enabled'
-            self._subtitle = 'Pull existing games from a named library, or ingest sources for conversion.'
+            self._summary = 'Sources and destinations'
+            self._subtitle = 'Find games on a home drive, send them to a handheld, or import originals for conversion.'
             primary = 'Start ingest' if self.ingest and self.backend else 'Open catalog'
-            rows = [row('catalog_open', 'Home & device libraries', 'Browse named sources and pull already-compressed games.', 'Open'),
+            rows = [row('catalog_open', 'Home libraries', 'Browse games and originals on your drives and network shares.', 'Browse'),
+                    row('tool_export', 'Sync to handheld', 'Select games, then connect your handheld over Wi-Fi.', 'Choose games'),
                     row('mount', 'Ingest from mounted folder', self.ingest or 'Browse a NAS, SMB, NFS, or external drive.', 'Browse'),
                     row('remotes', 'Configured rclone remotes', 'Lists the remotes already configured on this device.', 'Refresh')]
             if self.remote_names == []:

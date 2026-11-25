@@ -129,20 +129,20 @@ final class CardStore {
         }
     }
     private final Map<String,Verified> verifiedFiles=new HashMap<>();
-    private void verify(Uri uri, Wire.Entry e, Wire.Manifest offer, Wire.Progress progress) throws Exception {
+    private void verify(Uri uri, Wire.Entry e, Wire.Manifest offer, Wire.Phase phase, Wire.Progress progress) throws Exception {
         boolean playlist=Rules.playlist(e.path);
         ByteArrayOutputStream list=playlist ? new ByteArrayOutputStream((int)e.size) : null;
         try (ParcelFileDescriptor fd=open(uri,"r");
              InputStream in=new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor()))) {
             Verified v=new Verified(uri,Os.fstat(fd.getFileDescriptor()));
-            e.verify(in,list,progress);
+            e.verify(in,list,phase,progress);
             verifiedFiles.put(e.path,v);
         }
         if (list!=null) validatePlaylist(list.toByteArray(),e,offer);
     }
     private void same(Node n, Wire.Entry e, Wire.Manifest offer, Wire.Progress progress) throws Exception {
         if (n.dir) throw new IOException("A folder occupies " + e.path);
-        try { verify(n.uri,e,offer,progress); }
+        try { verify(n.uri,e,offer,Wire.Phase.EXISTING,progress); }
         catch (InterruptedIOException stop) { throw stop; }
         catch (Exception different) {
             throw new IOException("Existing file was not changed: " + e.path + ". " +
@@ -164,7 +164,7 @@ final class CardStore {
         // Playlists are small: authenticate and validate every reference before creating their entry point.
         byte[] list=null;
         if (Rules.playlist(name)) {
-            ByteArrayOutputStream bytes=new ByteArrayOutputStream((int)e.size); session.fetch(e,bytes,null);
+            ByteArrayOutputStream bytes=new ByteArrayOutputStream((int)e.size); session.fetch(e,bytes,progress);
             list=bytes.toByteArray(); validatePlaylist(list,e,offer);
         }
         Wire.check(); pending(e,"Creating new document; expected SHA-256 " + Rules.hex(e.digest));
@@ -189,7 +189,7 @@ final class CardStore {
                     out.flush(); out.getFD().sync();
                 }
             }
-            progress.show("Checking the card copy: " + e.path); verify(created,e,offer,progress);
+            verify(created,e,offer,Wire.Phase.READBACK,progress);
             verified=true; clear(e);
         } catch (Exception failure) {
             if (!verified) {
@@ -201,22 +201,21 @@ final class CardStore {
         } finally { if (guard!=null) guard.close(); }
     }
     int receive(Wire session, Wire.Manifest offer, Wire.Progress progress) throws Exception {
-        int added=0, index=0;
+        int added=0;
         for (Wire.Entry e : offer.entries) {
             Wire.check(); Uri parent=parent(e,false);
             if (parent==null) continue;
             Node n=lookup(parent,e.parts[e.parts.length-1],false);
-            if (n!=null) { progress.show("Checking existing file: " + e.path); same(n,e,offer,progress); }
+            if (n!=null) same(n,e,offer,progress);
         }
         for (Wire.Entry e : offer.entries) {
-            Wire.check(); index++; if (verifiedFiles.containsKey(e.path)) continue;
-            progress.show(index + " of " + offer.entries.size() + " · " + e.path);
+            Wire.check(); if (verifiedFiles.containsKey(e.path)) continue;
             Uri parent=parent(e,true); String name=e.parts[e.parts.length-1]; Node n=lookup(parent,name,true);
             if (n!=null) { same(n,e,offer,progress); continue; }
             add(session,e,offer,parent,name,progress); added++;
         }
         // A card removed, folder renamed or file replaced since preflight is not a completed import.
-        progress.show("Checking the complete selection…");
+        progress.show(Wire.Phase.SELECTION,null,0,Double.NaN);
         for (Wire.Entry e : offer.entries) {
             Wire.check(); Verified v=verifiedFiles.get(e.path);
             if (v==null) throw new IOException("Missing verification for " + e.path);
@@ -225,7 +224,7 @@ final class CardStore {
             // Closing a writer can update timestamps asynchronously on Android's
             // emulated storage. A changed stamp invalidates the fast path, not
             // the copy: use the manifest digest on a fresh read of the document.
-            if (!unchanged) verify(v.uri,e,offer,progress);
+            if (!unchanged) verify(v.uri,e,offer,Wire.Phase.SELECTION,progress);
         }
         return added;
     }

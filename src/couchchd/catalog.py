@@ -22,6 +22,11 @@ class Source:
     status: str
     last_seen: float | None
     error: str
+    directories: int | None
+    platform_folders: int
+    unplaced: int
+    unsupported: int
+    invalid_playlists: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,9 +37,12 @@ class Entry:
     status: str
     last_seen: float
     size: int
+    kind: str
+    system: str
 
 
-_SOURCE_FIELDS = 'id, name, location, status, last_seen, error'
+_SOURCE_FIELDS = ('id, name, location, status, last_seen, error, directories, platform_folders, '
+                  'unplaced, unsupported, invalid_playlists')
 _RECALBOX_SYSTEM = Path('/recalbox/share/system')
 _MOUNTINFO = Path('/proc/self/mountinfo')
 _ESCAPE = re.compile(rb'\\([0-7]{3})')
@@ -50,7 +58,6 @@ CREATE TABLE IF NOT EXISTS entry (
     relative TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (source_id, relative)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS entry_path ON entry(relative);
-COMMIT;
 '''
 
 
@@ -118,7 +125,20 @@ class Catalog:
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         os.close(fd)
         with self._connection() as db:
-            db.executescript(_SCHEMA)
+            if not db.execute('PRAGMA user_version').fetchone()[0]:
+                db.executescript(_SCHEMA)
+                # Recheck under BEGIN IMMEDIATE in case another process opened this
+                # preview.18 index first. A failed upgrade rolls back as a unit.
+                if not db.execute('PRAGMA user_version').fetchone()[0]:
+                    db.execute('ALTER TABLE source ADD COLUMN directories INTEGER')
+                    for name in ('platform_folders', 'unplaced', 'unsupported', 'invalid_playlists'):
+                        db.execute(f'ALTER TABLE source ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
+                    db.execute("ALTER TABLE entry ADD COLUMN kind TEXT NOT NULL DEFAULT 'output'")
+                    # Older snapshots could include firmware-named images or two
+                    # conflicting system ancestors. Never offer those as ready.
+                    db.create_function('eligible', 1, lambda key: catalog_transport.selectable_output(Path(key)))
+                    db.execute('DELETE FROM entry WHERE NOT eligible(relative)')
+                    db.execute('PRAGMA user_version=1')
 
     @contextmanager
     def _connection(self):
@@ -168,7 +188,7 @@ class Catalog:
         version = (source_id, generation)
         try:
             before = _mounted_state(location, mount)
-            games = catalog_transport.list_games(location, expected_root=before[1:] if before else None)
+            snapshot = catalog_transport.discover(location, expected_root=before[1:] if before else None)
             if before != _mounted_state(location, mount):
                 raise OSError('Source directory or mount changed during refresh')
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
@@ -179,12 +199,15 @@ class Catalog:
                 db.execute("UPDATE source SET status='offline',error=? WHERE id=? AND generation=?", (error, *version))
             return
         with self._connection() as db:
-            if not db.execute("UPDATE source SET status='online',last_seen=?,error='',mountpoint=? "
-                              'WHERE id=? AND generation=?', (time.time(), before[0] if before else None, *version)).rowcount:
+            if not db.execute("UPDATE source SET status='online',last_seen=?,error='',mountpoint=?,"
+                              'directories=?,platform_folders=?,unplaced=?,unsupported=?,invalid_playlists=? '
+                              'WHERE id=? AND generation=?',
+                              (time.time(), before[0] if before else None, snapshot.directories, snapshot.platform_folders,
+                               snapshot.unplaced, snapshot.unsupported, snapshot.invalid_playlists, *version)).rowcount:
                 return
             db.execute('DELETE FROM entry WHERE source_id=?', (source_id,))
-            db.executemany('INSERT INTO entry (source_id,relative,size) VALUES (?,?,?)',
-                           ((source_id, game.relative, game.size) for game in games))
+            db.executemany('INSERT INTO entry (source_id,relative,size,kind) VALUES (?,?,?,?)',
+                           ((source_id, game.relative, game.size, game.kind) for game in snapshot.games))
 
     def refresh(self, source_id: str | None = None) -> list[Source]:
         """Replace each reachable source snapshot atomically; retain its last good snapshot on failure."""
@@ -198,13 +221,14 @@ class Catalog:
 
     def entries(self, relative: str | None = None) -> list[Entry]:
         """One row per observed location, never a claim that matching paths have matching bytes."""
-        query = ('SELECT e.relative,s.id,s.name,s.status,s.last_seen,e.size '
+        query = ('SELECT e.relative,s.id,s.name,s.status,s.last_seen,e.size,e.kind '
                  'FROM entry e JOIN source s ON e.source_id=s.id ')
         if relative is not None:
             query += 'WHERE e.relative=? '
         with self._connection() as db:
-            return [Entry(*row) for row in db.execute(query + 'ORDER BY e.relative COLLATE NOCASE,e.relative,s.name_key',
-                                                     () if relative is None else (relative,))]
+            rows = db.execute(query + 'ORDER BY e.relative COLLATE NOCASE,e.relative,s.name_key',
+                              () if relative is None else (relative,))
+            return [Entry(*row, system) for row in rows if (system := catalog_transport.system_for(row[0]))]
 
     def pull(self, source_id: str, entry: str, destination: Path, progress=None) -> tuple[Path, ...]:
         """Copy a live, validated selection. Neither cached membership nor size authorizes a write."""

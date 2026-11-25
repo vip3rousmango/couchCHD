@@ -175,6 +175,25 @@ def test_browse_external_source_check_and_copy_without_opening_working_library(c
     assert not list(card.iterdir())
 
 
+def test_saved_wrapped_home_library_can_send_to_default_rg405m(controller, tmp_path, monkeypatch):
+    from couchchd.catalog import Catalog
+
+    state, choose, _ = controller
+    monkeypatch.setenv('XDG_DATA_HOME', str(tmp_path / 'app-data'))
+    root = tmp_path / 'NTFS'
+    key = 'Emulation/roms/PS1/Disc.chd'
+    (root / key).parent.mkdir(parents=True)
+    (root / key).write_bytes(b'disc')
+    Catalog().add('Windows library', root)
+    state._draw(True)
+    choose('tool_export')
+    choose('tool_saved')
+    choose('tool_saved_source', root)
+    choose('tool_pack_toggle', key)
+    assert any(r['key'] == 'tool_wifi' for r in state.modalRows)
+    assert state.backend is None
+
+
 @pytest.mark.parametrize('leave', ['back', 'exit', 'close'])
 def test_wifi_selection_and_explicit_approval(controller, tmp_path, monkeypatch, leave):
     from couchchd import wifi_sender
@@ -207,6 +226,7 @@ def test_wifi_selection_and_explicit_approval(controller, tmp_path, monkeypatch,
         pair_code = ''
         status = 'Waiting for receiver'
         closed = False
+        transfer = {'phase': 'waiting'}
 
         def approve(self):
             assert get_ident() != gui_thread
@@ -247,7 +267,7 @@ def test_wifi_selection_and_explicit_approval(controller, tmp_path, monkeypatch,
     choose('tool_pack_toggle', 'psx/Selected.chd')
     assert not calls
     choose('tool_wifi')
-    until(lambda: session.address in state.modal['body'])
+    until(lambda: state.transferView.get('address') == session.address)
     assert calls == [(library, ('psx/Selected.chd',), 'android-t618', ('pcsx-rearmed',))]
     assert any('couchCHD/receive' in r['detail'] for r in state.modalRows)
     until(lambda: any(r['key'] == 'tool_wifi_firewall' for r in state.modalRows))
@@ -259,6 +279,9 @@ def test_wifi_selection_and_explicit_approval(controller, tmp_path, monkeypatch,
     session.pair_code = '1234-5678-9abc'
     until(lambda: session.pair_code in state.modal['body'])
     assert not approved.is_set() and state.modalRows[0]['key'] == 'back'
+    session.transfer = dict(phase='sending', device='RG405M', file='Selected.chd', sent=128, total=512, rate=64)
+    until(lambda: state.transferView.get('fraction') == .25)
+    assert state.transferView['device'] == 'RG405M' and state.transferView['speed'].endswith('/s')
     if leave != 'exit':
         choose('tool_wifi_approve', session.pair_code)
         until(approved.is_set)

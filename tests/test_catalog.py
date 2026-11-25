@@ -1,3 +1,5 @@
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event, Thread
 
@@ -88,22 +90,22 @@ def test_outdated_refresh_cannot_replace_a_newer_snapshot(tmp_path, monkeypatch)
     source = shelf.add('Library', root)
     shelf.refresh()
     started, release = Event(), Event()
-    list_games = catalog.catalog_transport.list_games
+    discover = catalog.catalog_transport.discover
 
     def slow_list(location, **options):
-        games = list_games(location, **options)
+        games = discover(location, **options)
         started.set()
         if not release.wait(10):
             raise RuntimeError('refresh thread timed out')
         return games
 
-    monkeypatch.setattr(catalog.catalog_transport, 'list_games', slow_list)
+    monkeypatch.setattr(catalog.catalog_transport, 'discover', slow_list)
     thread = Thread(target=shelf.refresh, args=(source.id,))
     thread.start()
     try:
         assert started.wait(10)
         old.rename(old.with_name('New.chd'))
-        monkeypatch.setattr(catalog.catalog_transport, 'list_games', list_games)
+        monkeypatch.setattr(catalog.catalog_transport, 'discover', discover)
         assert catalog.Catalog(db).refresh()[0].status == 'online'
     finally:
         release.set()
@@ -140,9 +142,54 @@ def test_catalog_inventories_every_published_format_and_only_complete_sets(tmp_p
     disc(root, 'psx/Incomplete.m3u', b'Missing.chd\n')
     disc(root, 'psp/Original.iso', b'not compressed')
     source = shelf.add('Archive', root)
-    shelf.refresh(source.id)
-    assert {e.relative for e in shelf.entries()} == singles | {'psx/RPG.m3u'}
+    scanned, = shelf.refresh(source.id)
+    assert (scanned.invalid_playlists, scanned.unsupported) == (1, 0)
+    assert {e.relative for e in shelf.entries() if e.kind == 'output'} == singles | {'psx/RPG.m3u'}
+    assert [(e.relative, e.system) for e in shelf.entries() if e.kind == 'original'] == [('psp/Original.iso', 'psp')]
     assert shelf.entries('psx/RPG.m3u')[0].size == len(manifest) + 8
+
+
+def test_nested_platforms_keep_distinct_sources_and_never_promote_originals(tmp_path):
+    root, dest = tmp_path / 'master', tmp_path / 'device'
+    dest.mkdir()
+    data = {
+        'NTFS/Games/PS1/US/Rally.chd': b'first',
+        'Backup/psx/US/Rally.chd': b'other',
+        'NTFS/Games/psp/Title.iso': b'original',
+        'NTFS/Games/dreamcast/Disc.gdi': b'sheet',
+        'NTFS/Games/PS1/Disc.cue': b'sheet',
+        'NTFS/Games/PS1/Disc.zip': b'disc zip',
+        'NTFS/Games/n64/Demo.z64': b'cartridge',
+        'Unknown/Unknown.iso': b'unknown',
+        'Collections/psx/wii/Wrong.rvz': b'ambiguous',
+        'Old/psx/Archive.rar': b'unsupported',
+        'Old/psx/Firmware.chd': b'firmware',
+        'Old/bios/psx/Bios.chd': b'firmware',
+        '.cache/psp/Ghost.iso': b'hidden',
+    }
+    for path, content in data.items():
+        disc(root, path, content)
+    (root / 'linked').symlink_to(root / 'NTFS', target_is_directory=True)
+    shelf = catalog.Catalog(tmp_path / 'index.sqlite3')
+    source = shelf.add('Master', root)
+    scanned, = shelf.refresh(source.id)
+    assert scanned.directories > 1 and (scanned.unplaced, scanned.unsupported) == (2, 1)
+    entries = {(e.relative, e.kind, e.system) for e in shelf.entries()}
+    assert entries == {
+        ('NTFS/Games/PS1/US/Rally.chd', 'output', 'psx'), ('Backup/psx/US/Rally.chd', 'output', 'psx'),
+        ('NTFS/Games/psp/Title.iso', 'original', 'psp'), ('NTFS/Games/dreamcast/Disc.gdi', 'original', 'dreamcast'),
+        ('NTFS/Games/PS1/Disc.cue', 'original', 'psx'), ('NTFS/Games/PS1/Disc.zip', 'original', 'psx'),
+        ('NTFS/Games/n64/Demo.z64', 'original', 'n64'),
+    }
+    for key in ('NTFS/Games/psp/Title.iso', 'NTFS/Games/PS1/Disc.zip', 'Collections/psx/wii/Wrong.rvz'):
+        with pytest.raises(ValueError):
+            shelf.pull(source.id, key, dest)
+    output, = shelf.pull(source.id, 'NTFS/Games/PS1/US/Rally.chd', dest)
+    assert output == dest / 'psx/US/Rally.chd'
+    with pytest.raises(ValueError, match='Different file'):
+        shelf.pull(source.id, 'Backup/psx/US/Rally.chd', dest)
+    assert output.read_bytes() == b'first'
+    assert {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob('*') if p.is_file()} == data
 
 
 def test_offline_remote_retains_inventory_without_storing_command_errors(tmp_path, monkeypatch):
@@ -150,18 +197,97 @@ def test_offline_remote_retains_inventory_without_storing_command_errors(tmp_pat
     monkeypatch.setattr(catalog.cloud_ingest, 'remotes', lambda: ['pi:'])
     source = shelf.add('Pi', 'pi:/recalbox/share/roms')
     game = catalog.catalog_transport.Game('psx/RPG.chd', 55, ('psx/RPG.chd',))
-    monkeypatch.setattr(catalog.catalog_transport, 'list_games', lambda *a, **kw: [game])
+    snapshot = catalog.catalog_transport.Discovery([game], 2, 1, 0, 0)
+    monkeypatch.setattr(catalog.catalog_transport, 'discover', lambda *a, **kw: snapshot)
     first, = shelf.refresh()
 
     def unavailable(*args, **kwargs):
         raise RuntimeError('provider failed: secret=not-for-display')
 
-    monkeypatch.setattr(catalog.catalog_transport, 'list_games', unavailable)
+    monkeypatch.setattr(catalog.catalog_transport, 'discover', unavailable)
     second, = shelf.refresh()
     assert first.location == second.location == 'pi:/recalbox/share/roms'
     assert second.id == source.id and second.status == 'offline'
     assert second.last_seen == first.last_seen and 'secret' not in second.error
     assert [(e.relative, e.status) for e in shelf.entries()] == [('psx/RPG.chd', 'offline')]
+    assert (second.directories, second.platform_folders) == (2, 1)
+
+
+def test_old_database_migrates_offline_without_discarding_observations(tmp_path):
+    db = tmp_path / 'old.sqlite3'
+    with sqlite3.connect(db) as old:
+        old.executescript("""
+            CREATE TABLE source (id TEXT PRIMARY KEY, name TEXT NOT NULL, name_key TEXT UNIQUE NOT NULL,
+                location TEXT NOT NULL, status TEXT DEFAULT 'new', last_seen REAL, error TEXT DEFAULT '',
+                mountpoint TEXT, generation INTEGER DEFAULT 0);
+            CREATE TABLE entry (source_id TEXT NOT NULL REFERENCES source(id) ON DELETE CASCADE,
+                relative TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY(source_id,relative)) WITHOUT ROWID;
+            """)
+        old.execute('INSERT INTO source(id,name,name_key,location,status,last_seen) VALUES (?,?,?,?,?,?)',
+                    ('old', 'Archive', 'archive', str(tmp_path / 'unmounted'), 'online', 42))
+        old.execute("INSERT INTO entry VALUES('old','backup/PS1/Rally.chd',123)")
+        old.execute("INSERT INTO entry VALUES('old','psx/firmware.chd',456)")
+    shelf = catalog.Catalog(db)
+    offline, = shelf.refresh('old')
+    assert offline.status == 'offline' and offline.last_seen == 42 and offline.directories is None
+    entry, = catalog.Catalog(db).entries()
+    assert (entry.relative, entry.kind, entry.system, entry.size) == ('backup/PS1/Rally.chd', 'output', 'psx', 123)
+
+
+def test_controller_save_scans_empty_parent_then_refresh_finds_readonly_original(tmp_path, monkeypatch):
+    from couchchd.ui.catalog_controls import CatalogControls
+
+    root = tmp_path / 'master'
+    (root / 'Collections/Disc').mkdir(parents=True)
+    monkeypatch.setattr(catalog, '_RECALBOX_SYSTEM', tmp_path / 'no-recalbox')
+    monkeypatch.setenv('XDG_DATA_HOME', str(tmp_path / 'state'))
+
+    class Screen:
+        def _work(self, title, read, loaded):
+            # Match the real bridge seam: source I/O runs on the worker, then
+            # presentation resumes on the caller. No external GUI or SDL needed.
+            with ThreadPoolExecutor(max_workers=1) as worker:
+                result = worker.submit(read).result()
+            loaded(result)
+
+        def _show(self, kind, title, body, rows):
+            self.kind, self.body, self.rows = kind, body, rows
+
+        def _report(self, message):
+            self.status = message
+
+        def _hide(self):
+            self.kind = None
+
+        def switchTab(self, tab):
+            self.tab = tab
+
+    screen = Screen()
+    controls = CatalogControls(screen)
+    controls.chosen_directory(root)
+    controls.activate('catalog_name', 'Home')
+    controls.activate('catalog_save', '')
+    assert screen.kind == 'catalog_source' and '3 folders scanned' in screen.body
+    assert 'No supported platform folder found' in screen.body
+    original = disc(root, 'Collections/Disc/psp/Untouched.iso', b'not content-verified')
+    controls.activate('catalog_open', '')
+    assert not controls.files  # Browsing the cache doesn't scan again.
+    source, = controls.sources
+    controls.activate('catalog_source', source)
+    controls.activate('catalog_refresh_source', '')
+    assert '0 ready to copy · 1 original' in screen.body
+    controls.activate('catalog_systems', source)
+    assert [r['label'] for r in screen.rows] == ['PlayStation Portable']
+    controls.activate('catalog_system', 'psp')
+    choice, = screen.rows
+    assert choice['value'] == 'Needs conversion'
+    controls.activate(choice['key'], choice['arg'])
+    location, = screen.rows
+    controls.activate(location['key'], location['arg'])
+    assert str(original) in screen.body and 'catalog_pull' not in {r['key'] for r in screen.rows}
+    controls.activate('catalog_ingest', '')
+    assert screen.ingest == str(root) and screen.tab == 3 and screen.kind is None
+    assert original.read_bytes() == b'not content-verified'
 
 
 def test_default_catalog_lives_in_xdg_or_persistent_recalbox_data(tmp_path, monkeypatch):

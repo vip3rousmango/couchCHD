@@ -1,4 +1,4 @@
-"""Read selected published games from a mounted ROM tree or a configured rclone remote."""
+"""Read-only discovery of originals and selective copying of published games."""
 from __future__ import annotations
 
 import errno
@@ -9,41 +9,122 @@ import re
 import shutil
 import subprocess
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 
-from . import handheld
+from . import handheld, scanner
 from .ledger import SafetyError
 from .output_formats import SUFFIX_BY_MODE
 from .scanner import SYSTEMS, default_mode, library_root_allowed, safe_relative_name, visible_directory
 
 _MAX_PLAYLIST = 1024 * 1024
 _REMOTE = re.compile(r'([A-Za-z0-9_][A-Za-z0-9_. -]*):(.*)\Z')
+_ROM_SUFFIXES = frozenset(ext for exts in scanner.FORMATS.values() for ext in exts) | {
+    '.zip', '.rar', '.7z', '.chd', '.cso', '.rvz', '.m3u', '.pbp', '.cdi', '.ecm', '.wbfs',
+}
+# Prune excluded directory trees on the provider, not after fetching every row.
+# .chd_discs is the only hidden directory allowed (for complete playlist sets).
+_REMOTE_FILTERS = tuple(arg for pattern in (
+    '+ .chd_discs/', '- .*/',
+    *(f'- {name}/' for name in sorted(scanner._EXCLUDED_DIRS) if not name.startswith('.')),
+    '- mame/', '- mame[0-9]*/', '- mame[-_]*/',
+) for arg in ('--filter', pattern))
 
 
 @dataclass(frozen=True)
 class Game:
     relative: str
     size: int
-    members: tuple[str, ...]  # destination paths; playlist last
+    members: tuple[str, ...]  # exact source keys; empty for conversion candidates
+    kind: str = 'output'
 
 
-def _system(key):
-    return next((SYSTEMS[p.casefold()] for p in key.parts[:-1] if p.casefold() in SYSTEMS), None)
+@dataclass(frozen=True)
+class Discovery:
+    games: list[Game]
+    directories: int
+    platform_folders: int
+    unplaced: int
+    unsupported: int
+    invalid_playlists: int = 0
+
+
+@dataclass
+class _Inventory:
+    files: dict = field(default_factory=dict)
+    originals: list[Game] = field(default_factory=list)
+    directories: int = 0
+    platform_folders: int = 0
+    unplaced: int = 0
+    unsupported: int = 0
+
+    def add(self, key, kind, file):
+        if '.chd_discs' in key.parts and kind != 'image':
+            return
+        if kind == 'unplaced':
+            self.unplaced += 1
+        elif kind == 'unsupported':
+            self.unsupported += 1
+        elif kind == 'original':
+            self.originals.append(Game(key.as_posix(), file.size, (), 'original'))
+        else:
+            self.files[key] = file
+
+
+def _platform(key):
+    """A wrapper is not a system, and conflicting platform names are not a route."""
+    found = None
+    for i, part in enumerate(key.parts[:-1]):
+        if (system := SYSTEMS.get(part.casefold())):
+            if found is not None:
+                return None
+            found = i, system
+    return found
+
+
+def system_for(relative: str) -> str:
+    found = _platform(Path(relative))
+    return found[1] if found else ''
+
+
+def _directory(name):
+    return visible_directory(name) or name == '.chd_discs'
 
 
 def _kind(key):
-    system = _system(key)
-    if (not system or key.name.startswith('.') or
-            any(not visible_directory(p) and p != '.chd_discs' for p in key.parts[:-1])):
+    ext = key.suffix.casefold()
+    if (ext not in _ROM_SUFFIXES or key.name.startswith('.') or scanner._firmware_name(key)
+            or not all(map(_directory, key.parts[:-1]))):
         return None
-    if key.suffix.casefold() == '.m3u':
+    platform = _platform(key)
+    if not platform:
+        return 'unplaced'
+    index, system = platform
+    if '.chd_discs' in key.parts[:index]:
+        return None
+    if ext == '.m3u':
         return 'playlist'
     suffix = SUFFIX_BY_MODE[default_mode(system, '')]
-    if key.name.casefold().endswith(suffix) or (system == 'psp' and key.suffix.casefold() == '.cso'):
+    if key.name.casefold().endswith(suffix) or (system == 'psp' and ext == '.cso'):
         return 'image'
-    return None
+    if scanner.is_input_name(key, system) or scanner._local_zip(key, system):
+        return 'original'
+    return 'unsupported'
+
+
+def selectable_output(key: Path) -> bool:
+    return '.chd_discs' not in key.parts and _kind(key) in ('image', 'playlist')
+
+
+def _portable_directory(name):
+    if not _directory(name):
+        return False
+    try:
+        safe_relative_name(name)
+    except ValueError:
+        return False
+    return True
 
 
 def _raise(exc):
@@ -56,17 +137,19 @@ class _Mounted:
         self.prefix = Path(root.name) if root.name.casefold() in SYSTEMS else Path()
 
     def inventory(self):
-        result = {}
-        for base, dirs, names, fd in os.fwalk('.', dir_fd=self.fd, onerror=_raise):
-            dirs[:] = [d for d in dirs if visible_directory(d) or d == '.chd_discs']
+        result = _Inventory()
+        for base, dirs, names, fd in os.fwalk('.', dir_fd=self.fd, onerror=_raise, follow_symlinks=False):
+            dirs[:] = [d for d in dirs if _portable_directory(d)]
+            result.directories += 1
+            result.platform_folders += (self.prefix / base).name.casefold() in SYSTEMS
             for name in names:
                 path = Path(base) / name
                 key = self.prefix / path
-                if not _kind(key):
+                if not (kind := _kind(key)):
                     continue
                 try:
                     safe_relative_name(key.as_posix())
-                    result[key] = handheld.regular_file(path, fd)
+                    result.add(key, kind, handheld.regular_file(path, fd))
                 except ValueError:
                     continue  # Not a portable, nonempty regular game file.
         return result
@@ -122,6 +205,7 @@ class _Remote:
         # No inline backends, filters from filenames, password prompts or remote hashing shell.
         return [self.exe, command, '--ask-password=false', '--sftp-ask-password=false',
                 '--sftp-disable-hashcheck', '--sftp-shell-type', 'none', '--sftp-skip-links',
+                '--copy-links=false', '--links=false',
                 *flags, '--', target]
 
     def _json(self, *flags, path=None):
@@ -157,15 +241,20 @@ class _Remote:
             yield path, row
 
     def inventory(self):
-        result = {}
-        for path, row in self._rows('--recursive', '--files-only'):
+        result = _Inventory(directories=1, platform_folders=int(bool(self.prefix.parts)))
+        for path, row in self._rows('--recursive', '--ignore-case', *_REMOTE_FILTERS):
+            if row.get('IsDir') is True:
+                if all(map(_directory, path.parts)):
+                    result.directories += 1
+                    result.platform_folders += path.name.casefold() in SYSTEMS
+                continue
             key = self.prefix / path
-            if not _kind(key):
+            if not (kind := _kind(key)):
                 continue
             file = self._object(path, row)
             if file.size <= 0:
                 continue
-            result[key] = file
+            result.add(key, kind, file)
         return result
 
     def lookup(self, key):
@@ -279,25 +368,38 @@ def _members(store, key, lookup):
     return members, hashlib.sha256(data).digest()
 
 
-def list_games(location: str | Path, *, expected_root=None) -> list[Game]:
-    """Inventory metadata and complete playlists; do not download or verify game images."""
+def discover(location: str | Path, *, expected_root=None) -> Discovery:
+    """Read metadata and bounded playlist text only; never probe discs, archives or loose tracks."""
     with _open(location, expected_root) as store:
         inventory = store.inventory()
-        games = []
+        games = inventory.originals
+        invalid_playlists = 0
         grouped = set()
-        for key in sorted(inventory):
+        for key, file in inventory.files.items():
             if '.chd_discs' in key.parts:
                 continue
+            if key.suffix.casefold() != '.m3u':
+                name = key.as_posix()
+                games.append(Game(name, file.size, (name,)))
+                continue
             try:
-                pack, _ = _members(store, key, inventory.get)
+                pack, _ = _members(store, key, inventory.files.get)
             except _InvalidPlaylist:
+                invalid_playlists += 1
                 continue
             paths = tuple(p.as_posix() for p in pack)
             grouped.update(paths[:-1])
             games.append(Game(key.as_posix(), sum(f.size for f in pack.values()), paths))
         if isinstance(store, _Mounted):
             store.check(())  # Never cache a listing of a disconnected mount.
-        return [game for game in games if game.relative not in grouped]
+        return Discovery(sorted((g for g in games if g.relative not in grouped), key=lambda g: g.relative),
+                         inventory.directories, inventory.platform_folders, inventory.unplaced, inventory.unsupported,
+                         invalid_playlists)
+
+
+def list_games(location: str | Path, *, expected_root=None) -> list[Game]:
+    """List only selectable published games, not the originals detected alongside them."""
+    return [g for g in discover(location, expected_root=expected_root).games if g.kind == 'output']
 
 
 class _Reader:
@@ -339,17 +441,27 @@ def destination_paths(destination, members) -> tuple[Path, ...]:
     if not library_root_allowed(root):
         raise SafetyError(f'Excluded destination folder: {root}')
     direct = SYSTEMS.get(root.name.casefold())
+    folders = {}
+    if not direct:
+        with handheld.open_directory(root) as fd:
+            for name in os.listdir(fd):
+                if (system := SYSTEMS.get(name.casefold())):
+                    folders[system] = None if system in folders else name
     result = []
     for member in members:
         key = safe_relative_name(os.fspath(member))
-        if not _kind(key):
+        if _kind(key) not in ('image', 'playlist'):
             raise SafetyError(f'Not a compressed platform game: {key}')
-        if direct:
-            if _system(key) != direct:
-                raise SafetyError(f'Select a ROM parent or a matching platform folder, not {root.name}.')
-            idx = next(i for i, p in enumerate(key.parts[:-1]) if p.casefold() in SYSTEMS)
-            key = Path(*key.parts[idx + 1:])
-        result.append(root / key)
+        index, system = _platform(key)
+        tail = Path(*key.parts[index + 1:])
+        if direct and direct != system:
+            raise SafetyError(f'Select a ROM parent or a matching platform folder, not {root.name}.')
+        if not direct:
+            folder = folders.get(system, system)
+            if folder is None:
+                raise SafetyError(f'Multiple {system} folders; select one as the destination.')
+            tail = Path(folder) / tail
+        result.append(root / tail)
     return tuple(result)
 
 
@@ -357,13 +469,12 @@ def pull_game(location: str | Path, relative: str, destination: Path, progress=N
               expected_root=None) -> tuple[Path, ...]:
     """Verify one selected file or complete set; never replace differing bytes or create a missing root."""
     key = safe_relative_name(relative)
-    if not _kind(key) or '.chd_discs' in key.parts:
+    if not selectable_output(key):
         raise SafetyError(f'Not a selectable compressed game: {key}')
     dest = handheld.safe_absolute(destination)
     with _open(location, expected_root) as store, handheld.open_directory(dest) as destfd:
         if isinstance(store, _Mounted):
-            if (dest.is_relative_to(store.root) or store.root.is_relative_to(dest) or
-                    os.path.samestat(os.fstat(store.fd), os.fstat(destfd))):
+            if handheld._has_ancestor(destfd, store.fd) or handheld._has_ancestor(store.fd, destfd):
                 raise SafetyError('Source and destination libraries must not overlap.')
         pack, playlist_hash = _members(store, key, store.lookup)
         paths = tuple(pack)

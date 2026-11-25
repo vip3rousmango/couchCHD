@@ -14,7 +14,13 @@ import java.util.*;
 import javax.net.ssl.*;
 
 final class Wire {
-    interface Progress { void show(String message); }
+    enum Phase {
+        COPY("Receiving over Wi-Fi"), EXISTING("Checking existing file"), READBACK("Verifying card copy"),
+        SELECTION("Verifying selection"), CLOSE("Closing sender session");
+        final String title;
+        Phase(String title) { this.title = title; }
+    }
+    interface Progress { void show(Phase phase, Entry entry, long bytes, double bytesPerSecond); }
     static void check() throws InterruptedIOException {
         if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException("Stopped.");
     }
@@ -68,6 +74,7 @@ final class Wire {
         throw new IOException("No sender found. Open Send over Wi-Fi on the same network, or enter its IPv4 address.");
     }
     final Peer peer; final String code;
+    String hostLabel = "";
     private final String token; private final SSLContext tls;
     Wire(Peer peer) throws Exception {
         this.peer = peer;
@@ -109,14 +116,31 @@ final class Wire {
             return out.toString("UTF-8");
         }
     }
+    static final class Unavailable extends IOException {
+        Unavailable(String message) { super(message); }
+        Unavailable(IOException cause) { super(cause.getMessage(),cause); }
+    }
+    static boolean connectionLost(Throwable problem) {
+        for (Throwable e = problem; e != null; e = e.getCause()) {
+            if (e instanceof Unavailable) return true;
+        }
+        return false;
+    }
     private static void ok(HttpsURLConnection c) throws IOException {
         int rc = c.getResponseCode();
-        if (rc != 200) throw new IOException("Sender returned " + rc + ". Check the session on the host.");
+        if (rc != 200) throw new Unavailable("Sender returned " + rc + ". Reopen Send over Wi-Fi on the host.");
     }
-    void pair() throws Exception {
+    void pair(String model) throws Exception {
         HttpsURLConnection c = connection("/pair", true);
-        try { c.getOutputStream().close(); ok(c);
-            if (!code.equals(new JSONObject(json(c, 4096)).getString("code"))) throw new IOException("Pairing codes disagree. Close the sender.");
+        try {
+            if (!model.isEmpty()) c.setRequestProperty("X-CouchCHD-Device", model);
+            c.getOutputStream().close(); ok(c);
+            JSONObject reply = new JSONObject(json(c, 4096));
+            if (!code.equals(reply.getString("code"))) throw new IOException("Pairing codes disagree. Close the sender.");
+            Object host = reply.opt("host");
+            if (host instanceof String) hostLabel = Rules.deviceLabel((String)host);
+        } catch (SocketException | SocketTimeoutException | SSLException | EOFException e) {
+            throw new Unavailable(e);
         } finally { c.disconnect(); }
     }
     Manifest manifest() throws Exception {
@@ -124,20 +148,27 @@ final class Wire {
         try {
             if (c.getResponseCode() == 403) return null;
             ok(c); return new Manifest(new JSONObject(json(c, 4 * 1024 * 1024)));
+        } catch (SocketException | SocketTimeoutException | SSLException | EOFException e) {
+            throw new Unavailable(e);
         } finally { c.disconnect(); }
     }
     void fetch(Entry e, OutputStream out, Progress progress) throws Exception {
         HttpsURLConnection c = connection("/file/" + e.id, false);
         try {
-            ok(c); long length = c.getContentLengthLong();
-            if (length >= 0 && length != e.size) throw new IOException("File size changed: " + e.path);
-            try (InputStream in = c.getInputStream()) { e.verify(in, out, progress); }
+            progress.show(Phase.COPY,e,0,Double.NaN);
+            InputStream payload;
+            try {
+                ok(c); long length = c.getContentLengthLong();
+                if (length >= 0 && length != e.size) throw new IOException("File size changed: " + e.path);
+                payload = c.getInputStream();
+            } catch (IOException unavailable) { throw new Unavailable(unavailable); }
+            try (InputStream in = payload) { e.verify(in, out, Phase.COPY, progress); }
         } finally { c.disconnect(); }
     }
-    void done() {
+    boolean done() {
         try { HttpsURLConnection c = connection("/done", true);
-            try { c.getOutputStream().close(); ok(c); } finally { c.disconnect(); }
-        } catch (IOException ignored) { /* All files are already verified on the card. */ }
+            try { c.getOutputStream().close(); ok(c); return true; } finally { c.disconnect(); }
+        } catch (IOException ignored) { return false; } // The card copy is already verified.
     }
     private static long integer(JSONObject j, String key) throws JSONException, IOException {
         Object value = j.get(key);
@@ -153,17 +184,27 @@ final class Wire {
                 throw new IOException("Invalid entry: " + path);
             id = (int)value;
         }
-        void verify(InputStream in, OutputStream copy, Progress progress) throws IOException {
+        int position;
+        void verify(InputStream in, OutputStream copy, Phase phase, Progress progress) throws IOException {
             if (in == null) throw new IOException("Cannot read " + path);
-            long total = 0, next = System.nanoTime() + 1000000000L; int n;
+            long total = 0, sampleTime = System.nanoTime(), sampleBytes = 0; int n;
+            if (phase != Phase.COPY) progress.show(phase,this,0,Double.NaN);
             MessageDigest hash = Rules.sha(); byte[] b = new byte[128*1024];
-            while ((n = in.read(b)) != -1) {
+            while (true) {
+                try { n = in.read(b); }
+                catch (IOException ex) { if (phase == Phase.COPY) throw new Unavailable(ex); throw ex; }
+                if (n < 0) break;
                 check(); if (size-total < n) throw new IOException("Size differs: " + path);
                 hash.update(b,0,n); if (copy != null) copy.write(b,0,n); total += n;
-                if (progress != null && System.nanoTime() >= next) {
-                    progress.show(path + " · " + (total >> 20) + " / " + (size >> 20) + " MiB"); next = System.nanoTime() + 1000000000L;
+                long now = System.nanoTime();
+                if (now - sampleTime >= 400000000L || total == size) {
+                    // COPY is used only with the pinned HTTPS response stream, never a SAF read.
+                    double rate = phase == Phase.COPY && now > sampleTime
+                        ? (total - sampleBytes) * 1e9 / (now - sampleTime) : Double.NaN;
+                    progress.show(phase,this,total,rate); sampleTime = now; sampleBytes = total;
                 }
             }
+            if (phase == Phase.COPY && total < size) throw new Unavailable("Sender stopped before " + path + " was complete.");
             if (total != size || !MessageDigest.isEqual(hash.digest(), digest)) throw new IOException("Contents differ: " + path);
         }
     }
@@ -181,6 +222,7 @@ final class Wire {
                 paths.add(e.path); entries.add(e); sum += e.size;
             }
             entries.sort(Comparator.comparing(e -> Rules.playlist(e.path))); bytes = sum;
+            for (int i = 0; i < entries.size(); i++) entries.get(i).position = i + 1;
         }
     }
 }

@@ -44,9 +44,9 @@ def _parser():
                          help='remember a mounted ROM library or configured rclone remote:path')
     actions.add_argument('--catalog-forget', metavar='SOURCE_ID', help='forget a source without changing its media')
     actions.add_argument('--catalog-sources', action='store_true', help='list named home/device libraries and last refresh status')
-    actions.add_argument('--catalog-refresh', action='store_true', help='refresh compressed game inventories, retaining offline sources')
-    actions.add_argument('--catalog-list', action='store_true', help='list cached games and their source libraries')
-    actions.add_argument('--catalog-where', metavar='RELATIVE_PATH', help='list locations reporting this compressed path')
+    actions.add_argument('--catalog-refresh', action='store_true', help='recursively inventory ready games and supported originals; retain offline results')
+    actions.add_argument('--catalog-list', action='store_true', help='list cached games and originals with their source libraries')
+    actions.add_argument('--catalog-where', metavar='RELATIVE_PATH', help='list libraries reporting this relative path')
     actions.add_argument('--catalog-pull', nargs=2, metavar=('SOURCE_ID', 'RELATIVE_PATH'),
                          help='pull an existing compressed game to --dest without conversion')
     p.add_argument('--dest', type=Path, help='destination directory for extraction, handheld export or catalog pull')

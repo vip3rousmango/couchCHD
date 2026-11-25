@@ -34,6 +34,20 @@ final class Rules {
         MessageDigest digest = sha(); digest.update(pin); String s = hex(digest.digest(secret));
         return s.substring(0,4) + "-" + s.substring(4,8) + "-" + s.substring(8,12);
     }
+    // Display hints only. Use the same small ASCII alphabet in headers and on screen.
+    static String deviceLabel(String raw) {
+        if (raw == null) return "";
+        StringBuilder label = new StringBuilder(48);
+        boolean gap = false;
+        for (int i = 0; i < raw.length() && label.length() < 48; i++) {
+            char c = raw.charAt(i);
+            if (c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || "._()-".indexOf(c) >= 0) {
+                if (gap && label.length() > 0 && label.length() < 47) label.append(' ');
+                label.append(c); gap = false;
+            } else gap = true;
+        }
+        return label.toString();
+    }
     static String fold(String name) {
         return Normalizer.normalize(name, Normalizer.Form.NFC).toUpperCase(Locale.ROOT).toLowerCase(Locale.ROOT);
     }

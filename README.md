@@ -12,7 +12,7 @@ curl -f https://vip3rousmango.github.io/couchCHD/i | sh
 
 This runs code from this repository as your current user. To inspect it first, download the script to a file, read it, then run `sh install-device.sh`. Don't use `sudo` on the Deck. No build machine, clone, Python installation, or GitHub login is required on the target.
 
-The installer selects the x86-64 AppImage, aarch64 tarball or single-card Recalbox image from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.18), verifies SHA-256 against the release manifest, and runs `--version` before activating it. Both architectures require **64-bit Linux userspace, glibc 2.36+**, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported.
+The installer selects the x86-64 AppImage, aarch64 tarball or single-card Recalbox image from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.19), verifies SHA-256 against the release manifest, and runs `--version` before activating it. Both architectures require **64-bit Linux userspace, glibc 2.36+**, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported.
 
 Desktop Linux gets an Applications menu entry and launches immediately if a graphical display is available. On appliances the installer registers the launcher, tells you how to refresh the menu, and leaves the current frontend running. Setup does not convert or purge anything.
 
@@ -82,7 +82,7 @@ The report does not scan ROMs, change files, or upload anything. If there's no s
 
 **Leave the SD card in the handheld.** On your RG405M, open [Get CouchCHD Receive](https://vip3rousmango.github.io/couchCHD/receive/), install our Android companion, and join the same home network as your Deck or Bazzite PC. There is no account, Samba share, or third-party sync app to configure.
 
-1. On the computer open **Dashboard → Sync to handheld**, choose an Android profile, select games from **one platform**, and choose **Send over Wi-Fi**.
+1. On the computer open **Dashboard → Sync to handheld**. The default **RG405M** profile can send directly; choose another Android profile/installed player if needed. Use **Choose from home libraries** or **Browse a source folder**, select one game (or several from one platform), then **Send over Wi-Fi**.
 2. On the handheld open **CouchCHD Receive** and find the computer. Compare the code on both screens before approving; if they differ, cancel. Use the app’s manual address option if the host does not appear. Don’t forward ports on your router.
 3. When Android asks where games go, open the same game folder Daijishō uses for that platform (for example `ROMs/PSP`, not the entire card), then choose **Use this folder → Receive files**. Keep both apps open. A new filename can appear before the copy is ready; wait for **Transfer complete**, then choose **Sync** in Daijishō.
 
@@ -156,7 +156,7 @@ For a read-only NTFS collection on Bazzite, use **mounted-folder ingest** into a
 
 ### Reuse compressed games across devices
 
-In **NAS / Cloud**, add named libraries: for example, the Deck's ROM folder, the Bazzite-mounted NTFS library, and the RG405M card while it is in a reader. Choose **Refresh**, browse the compressed inventory, then select a specific location and pull into a writable ROM library. A disconnected source keeps its last-seen inventory; it must be reachable to transfer. Matching paths identify possible copies, **not** identical discs or regions.
+In **Dashboard → Home libraries** or **Libraries & devices**, add a named folder: the Deck's EmuDeck folder, the Bazzite-mounted NTFS library, or a handheld card in a reader. Saving scans it recursively. Browse by system to distinguish ready game files from originals that still need conversion. For a library saved with an older release, choose **Refresh** once. A disconnected drive keeps its last-seen inventory; it must be reachable to transfer. Matching paths identify possible copies, **not** identical discs or regions.
 
 Sources can be existing mounted directories (local, SMB, NFS, SSHFS) or **already configured** rclone remotes, including SFTP. For SFTP, verify the peer's SSH host key and configure rclone's `known_hosts_file`. A Pi without rclone can use an OS-mounted share. The catalog has no listener, automatic device enrollment, background mirror or delete propagation. The separate **Send over Wi-Fi** action opens a temporary sender for an explicitly selected Android pack.
 
