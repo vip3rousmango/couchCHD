@@ -38,7 +38,7 @@ final class Wire {
         }
         return InetAddress.getByAddress(b);
     }
-    static Peer find(String host) throws Exception {
+    static List<Peer> find(String host) throws Exception {
         Set<InetAddress> targets = new LinkedHashSet<>();
         InetAddress manual = host.isEmpty() ? null : ipv4(host);
         if (manual != null) targets.add(manual);
@@ -51,6 +51,8 @@ final class Wire {
             }
         }
         byte[] request = "CouchCHD/1 find".getBytes(StandardCharsets.US_ASCII), buf = new byte[1024];
+        // Keep the whole broadcast response window: the Deck and the PC may both be listening.
+        Map<String,Peer> found = new TreeMap<>();
         try (DatagramSocket sock = new DatagramSocket()) {
             sock.setBroadcast(true); sock.setSoTimeout(300);
             for (int round = 0; round < 4; round++) {
@@ -62,19 +64,28 @@ final class Wire {
                 while (System.nanoTime() < until) {
                     check(); DatagramPacket p = new DatagramPacket(buf, buf.length);
                     try { sock.receive(p); } catch (SocketTimeoutException timeout) { continue; }
-                    if (!(p.getAddress() instanceof Inet4Address) || (manual != null && !manual.equals(p.getAddress()))) continue;
+                    if (p.getPort() != 42846 || !(p.getAddress() instanceof Inet4Address) ||
+                        (manual != null && !manual.equals(p.getAddress()))) continue;
+                    Peer peer;
                     try {
                         JSONObject j = new JSONObject(new String(buf, 0, p.getLength(), StandardCharsets.UTF_8));
                         int port = j.getInt("port"); byte[] pin = Rules.digestBytes(j.getString("fingerprint"));
-                        if (port > 0 && port <= 65535) return new Peer(p.getAddress().getHostAddress(), port, pin);
-                    } catch (JSONException | IOException invalid) { /* ignore unrelated/malformed advertisements */ }
+                        if (port <= 0 || port > 65535) continue;
+                        peer = new Peer(p.getAddress().getHostAddress(), port, pin);
+                    } catch (JSONException | IOException invalid) { continue; }
+                    if (manual != null) return Collections.singletonList(peer);
+                    Peer previous = found.put(peer.host, peer);
+                    if (previous != null && (previous.port != peer.port || !MessageDigest.isEqual(previous.pin, peer.pin)))
+                        throw new IOException("Sender changed during discovery. Find it again and compare the code.");
+                    if (found.size() > 32) throw new IOException("Too many senders. Enter the host IP instead.");
                 }
             }
         }
-        throw new IOException("No sender found. Open Send over Wi-Fi on the same network, or enter its IPv4 address.");
+        if (!found.isEmpty()) return new ArrayList<>(found.values());
+        throw new IOException("No sender found. Open Connect a handheld on the same network, or enter its IPv4 address.");
     }
     final Peer peer; final String code;
-    String hostLabel = "";
+    String hostLabel = "", hostKind = "";
     private final String token; private final SSLContext tls;
     Wire(Peer peer) throws Exception {
         this.peer = peer;
@@ -128,7 +139,7 @@ final class Wire {
     }
     private static void ok(HttpsURLConnection c) throws IOException {
         int rc = c.getResponseCode();
-        if (rc != 200) throw new Unavailable("Sender returned " + rc + ". Reopen Send over Wi-Fi on the host.");
+        if (rc != 200) throw new Unavailable("Sender returned " + rc + ". Start a new connection on the host.");
     }
     void pair(String model) throws Exception {
         HttpsURLConnection c = connection("/pair", true);
@@ -139,18 +150,37 @@ final class Wire {
             if (!code.equals(reply.getString("code"))) throw new IOException("Pairing codes disagree. Close the sender.");
             Object host = reply.opt("host");
             if (host instanceof String) hostLabel = Rules.deviceLabel((String)host);
+            String kind = reply.optString("kind");
+            if ("deck".equals(kind) || "pi".equals(kind)) hostKind = kind;  // Display hint, not identity.
         } catch (SocketException | SocketTimeoutException | SSLException | EOFException e) {
             throw new Unavailable(e);
         } finally { c.disconnect(); }
     }
-    Manifest manifest() throws Exception {
-        HttpsURLConnection c = connection("/manifest", false);
-        try {
-            if (c.getResponseCode() == 403) return null;
-            ok(c); return new Manifest(new JSONObject(json(c, 4 * 1024 * 1024)));
-        } catch (SocketException | SocketTimeoutException | SSLException | EOFException e) {
-            throw new Unavailable(e);
-        } finally { c.disconnect(); }
+    interface Waiting { void show(boolean preparing); }
+    Manifest awaitManifest(Waiting waiting) throws Exception {
+        long approvalDeadline = System.nanoTime() + 120000000000L;
+        String lastState = "";
+        while (true) {
+            HttpsURLConnection c = connection("/manifest", false);
+            try {
+                c.setRequestProperty("X-CouchCHD-Wait", "1");
+                int rc = c.getResponseCode();
+                if (rc == 200) return new Manifest(new JSONObject(json(c, 4 * 1024 * 1024)));
+                if (rc == 202) {
+                    String state = new JSONObject(json(c, 4096)).getString("state");
+                    if (!state.equals("waiting") && !state.equals("preparing"))
+                        throw new Unavailable("Unknown sender state. Update CouchCHD on both devices.");
+                    if (!lastState.equals(state)) waiting.show(state.equals("preparing"));
+                    lastState = state;
+                } else if (rc == 403 && lastState.isEmpty()) {
+                    if (System.nanoTime() >= approvalDeadline)
+                        throw new IOException("No host approval yet. Check the computer, then confirm again.");
+                } else throw new Unavailable("Sender returned " + rc + ". Start a new connection on the host.");
+            } catch (SocketException | SocketTimeoutException | SSLException | EOFException e) {
+                throw new Unavailable(e);
+            } finally { c.disconnect(); }
+            check(); Thread.sleep(1000);
+        }
     }
     void fetch(Entry e, OutputStream out, Progress progress) throws Exception {
         HttpsURLConnection c = connection("/file/" + e.id, false);
@@ -165,10 +195,14 @@ final class Wire {
             try (InputStream in = payload) { e.verify(in, out, Phase.COPY, progress); }
         } finally { c.disconnect(); }
     }
-    boolean done() {
-        try { HttpsURLConnection c = connection("/done", true);
+    boolean done() { return finish("/done"); }
+    void disconnect() { finish("/disconnect"); }
+    private boolean finish(String path) {
+        try { HttpsURLConnection c = connection(path, true);
+            // A disconnected receiver must not stall a subsequent Find behind long transfer timeouts.
+            if ("/disconnect".equals(path)) { c.setConnectTimeout(1500); c.setReadTimeout(1500); }
             try { c.getOutputStream().close(); ok(c); return true; } finally { c.disconnect(); }
-        } catch (IOException ignored) { return false; } // The card copy is already verified.
+        } catch (IOException ignored) { return false; } // Best effort; never treat this as a card write failure.
     }
     private static long integer(JSONObject j, String key) throws JSONException, IOException {
         Object value = j.get(key);

@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -46,10 +47,10 @@ def _visible(path: Path) -> bool:
 
 def _destination(path: Path, root: Path, systems: set[str]) -> tuple[str, Path] | None:
     source = root / path
-    folder = scanner.system_folder(root, source)
-    if folder is None:
+    platform = scanner.platform_directory(root, source.parent)
+    if platform is None:
         return None
-    system = scanner.SYSTEMS[folder.name.casefold()]
+    folder, system = platform
     if system not in systems or not scanner.is_input_name(path, system):
         return None
     relative = Path(system) / source.relative_to(folder)
@@ -139,6 +140,14 @@ def _preparing(on_item, key, name, system):
         raise
 
 
+def _ambiguous(key, name, system, on_issue, on_item):
+    reason = f'Ambiguous output for {key}; compare the source copies before converting.'
+    if on_issue:
+        on_issue(reason)
+    if on_item:
+        on_item(ItemProgress(key, name, system, 'skipped', detail=reason))
+
+
 def _mounted(root: Path, scratch: Path, systems: set[str], cancel: threading.Event, on_item, on_issue):
     if scratch.resolve().is_relative_to(root):
         raise ValueError('Scratch must be outside the selected source directory')
@@ -163,11 +172,7 @@ def _mounted(root: Path, scratch: Path, systems: set[str], cancel: threading.Eve
         _cancelled(cancel)
         key = str(game.source)
         if counts[route] != 1:
-            reason = f'Ambiguous output for {key}; compare the loose and archived sources before converting.'
-            if on_issue:
-                on_issue(reason)
-            if on_item:
-                on_item(ItemProgress(key, game.source.name, game.system, 'skipped', detail=reason))
+            _ambiguous(key, game.source.name, game.system, on_issue, on_item)
             continue
         with ExitStack() as disc:
             if game.archive:
@@ -229,13 +234,13 @@ def _listing(remote: str, cancel: threading.Event) -> dict[str, list[_Object]]:
     return index
 
 
-def _cloud(remote: str, scratch: Path, systems: set[str], cancel: threading.Event, on_item):
+def _cloud(remote: str, scratch: Path, systems: set[str], cancel: threading.Event, on_item, on_issue):
     name, colon, prefix = remote.partition(':')
     if not colon or name + colon not in remotes():
         raise ValueError(f'Not a mounted directory or configured rclone remote: {remote}')
     if prefix.strip('/'):
         scanner.safe_relative_name(prefix.strip('/'))
-    root = Path(prefix.rstrip('/') or name)
+    root = Path(prefix.rstrip('/'))  # The remote's connection name is never a system-folder hint.
     if not scanner.library_root_allowed(root):
         return
     index = _listing(remote, cancel)
@@ -249,14 +254,27 @@ def _cloud(remote: str, scratch: Path, systems: set[str], cancel: threading.Even
         if not destination.is_file() or destination.is_symlink() or destination.stat().st_size != obj.size:
             raise ValueError(f'Incomplete download: {obj.path}')
 
+    routes = []
+    counts = Counter()
     for objects in index.values():
         _cancelled(cancel)
         obj = objects[0]
         route = _destination(obj.path, root, systems)
-        if route is None or time.time() - obj.modified < 10:
+        if route is None:
+            continue
+        system, output = route
+        counts[system, output.name.casefold()] += 1
+        routes.append((objects, system, output))
+
+    for objects, system, output in routes:
+        _cancelled(cancel)
+        obj = objects[0]
+        if time.time() - obj.modified < 10:
             continue
         key = remote_base + obj.path.as_posix()
-        system, output = route
+        if counts[system, output.name.casefold()] > 1:
+            _ambiguous(key, obj.path.name, system, on_issue, on_item)
+            continue
         base = obj.path.parent
         with ExitStack() as disc:
             with _preparing(on_item, key, obj.path.name, system):
@@ -302,4 +320,4 @@ def games(remote: str, scratch: Path, systems: set[str], cancel: threading.Event
     if mount.is_dir():
         yield from _mounted(mount.resolve(), scratch, systems, cancel, on_item, on_issue)
     else:
-        yield from _cloud(remote, scratch, systems, cancel, on_item)
+        yield from _cloud(remote, scratch, systems, cancel, on_item, on_issue)

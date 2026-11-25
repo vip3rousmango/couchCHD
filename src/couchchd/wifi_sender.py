@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler
+from typing import NamedTuple
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -25,10 +26,12 @@ from cryptography.x509.oid import NameOID
 
 from .handheld import _read_source, platform_sources
 from .ledger import SafetyError
+from .profiles import host_kind
 
 _DISCOVERY_PORT = 42846
 _PAIR_SECONDS = 5 * 60
 _IDLE_SECONDS = 10 * 60
+_HEARTBEAT_SECONDS = 15  # Receive polls /manifest every second until it gets an offer.
 _MAX_SECONDS = 12 * 60 * 60
 _REQUEST_SECONDS = 15
 _CHUNK = 256 * 1024
@@ -147,22 +150,35 @@ class _Request(BaseHTTPRequestHandler):
             response = {'code': code}
             if self.server._host:
                 response['host'] = self.server._host
+            if self.server._kind != 'computer':
+                response['kind'] = self.server._kind
             return self._reply(status, _json(response))
-        if self.path == '/done' and self.server._authorized(self.client_address[0], token):
-            self.server._stop('complete', 'Receiver confirmed completion. Wi-Fi sender closed.', finish_reply=True)
+        if self.path == '/disconnect':
+            if not self.server._owns_session(self.client_address[0], token):
+                return self._reply(403)
+            self.server._stop('disconnected', 'The handheld disconnected. Start a new connection to pair again.',
+                              finish_reply=True)
             return self._reply(200)
-        self._reply(403 if self.path == '/done' else 404)
+        if self.path != '/done':
+            return self._reply(404)
+        if not self.server._authorized(self.client_address[0], token):
+            return self._reply(403)
+        if self.server._selection is None:
+            return self._reply(409)
+        self.server._stop('complete', 'Receiver confirmed completion. Wi-Fi sender closed.', finish_reply=True)
+        self._reply(200)
 
     def do_GET(self):
         sender = self.server
         if not sender._authorized(self.client_address[0], self._token()):
             return self._reply(403)
         if self.path == '/manifest':
-            return self._reply(200, sender._manifest)
+            return self._reply(*sender._manifest_reply(self.headers.get('X-CouchCHD-Wait') == '1'))
         m = re.fullmatch(r'/file/(0|[1-9][0-9]{0,4})', self.path)
-        if not m or int(m[1]) >= len(sender._files):
+        selection = sender._selection
+        if not m or selection is None or int(m[1]) >= len(selection.files):
             return self._reply(404)
-        path, source = sender._files[int(m[1])]
+        path, source = selection.files[int(m[1])]
         started = False
         try:
             sender._begin_file(path.as_posix(), source.size)
@@ -193,14 +209,17 @@ class _Request(BaseHTTPRequestHandler):
 
 
 class _Sender:
-    def __init__(self, iface, ctx, fingerprint, files, manifest, resources, check):
+    def __init__(self, iface, ctx, fingerprint, selection, resources, cancel):
         self._iface, self._ctx, self._fingerprint = iface, ctx, fingerprint
-        self._files, self._manifest = files, manifest
+        self._selection = selection
+        self._resources, self._cancel = resources, cancel
+        self._heartbeat = float('inf')
         self._lock = threading.Lock()
         self._released = threading.Event()
         self._closed = self._approved = False
         self._candidate = self._peer = None
         self._host = self._device = self._file = ''
+        self._kind = host_kind()
         with contextlib.suppress(OSError):
             self._host = _display_name(socket.gethostname().partition('.')[0])
         self._phase = 'waiting'
@@ -213,10 +232,10 @@ class _Sender:
         self._active = None
         self._request_until = 0.0
         with contextlib.ExitStack() as sockets:
-            check()
+            _check_cancel(cancel)
             self._tcp = sockets.enter_context(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
             self._tcp.bind((str(iface.ip), 0))
-            check()
+            _check_cancel(cancel)
             self._tcp.listen(4)
             self._tcp.setblocking(False)
             port = self._tcp.getsockname()[1]
@@ -233,8 +252,8 @@ class _Sender:
             self._tx.setblocking(False)
             listeners = sockets.pop_all()
             try:
-                check()
-                threading.Thread(target=self._listen, args=(listeners, resources),
+                _check_cancel(cancel)
+                threading.Thread(target=self._listen, args=(listeners,),
                                  name='CouchCHD Wi-Fi', daemon=True).start()
             except BaseException:
                 listeners.close()
@@ -265,7 +284,7 @@ class _Sender:
 
     def _pair(self, peer, token, device):
         with self._lock:
-            if self._closed or time.monotonic() >= min(self._until, self._idle):
+            if not self._live():
                 return 403, ''
             if self._candidate is None:
                 self._peer, self._candidate = peer, token
@@ -279,23 +298,78 @@ class _Sender:
 
     def approve(self):
         with self._lock:
-            if self._closed or self._candidate is None or time.monotonic() >= self._until:
+            if not self._live() or self._candidate is None:
                 raise SafetyError('There is no current pairing request to approve.')
             if not self._approved:
                 self._approved = True
                 now = time.monotonic()
                 self._until, self._idle = now + _MAX_SECONDS, now + _IDLE_SECONDS
-                self._phase = 'connected'
-                self._status = 'Approved. Choose the platform folder on the handheld.'
+                self._phase = 'approved'
+                self._status = 'Approved here. Confirm Codes match on the handheld to connect.'
+
+    def _live(self):
+        """Caller holds the lock. Never revive an expired session between listener ticks."""
+        return (not self._closed and not (self._cancel and self._cancel.is_set()) and
+                time.monotonic() < min(self._until, self._idle, self._heartbeat))
+
+    def _matches(self, peer, token):
+        return (self._live() and peer == self._peer and self._candidate is not None
+                and token is not None and hmac.compare_digest(token, self._candidate))
+
+    def _owns_session(self, peer, token):
+        with self._lock:
+            return self._matches(peer, token)
 
     def _authorized(self, peer, token):
         with self._lock:
-            now = time.monotonic()
-            if (self._closed or now >= min(self._until, self._idle) or not self._approved or peer != self._peer
-                    or token is None or not hmac.compare_digest(token, self._candidate)):
+            if not self._approved or not self._matches(peer, token):
                 return False
-            self._idle = now + _IDLE_SECONDS
+            self._idle = time.monotonic() + _IDLE_SECONDS
             return True
+
+    def _manifest_reply(self, can_wait):
+        with self._lock:
+            if not self._live():
+                return 403, b''
+            if self._selection is None:
+                self._heartbeat = time.monotonic() + _HEARTBEAT_SECONDS
+                if self._phase == 'approved':
+                    self._phase = 'connected'
+                    self._status = ('Connected. Choose games on this computer.' if can_wait else
+                                    'Connected. If Receive reports 202, update CouchCHD Receive and reconnect.')
+                return 202, b'{"state":"preparing"}' if self._phase == 'preparing' else b'{"state":"waiting"}'
+            self._heartbeat = float('inf')  # The receiver now needs time to choose the folder and check its card.
+            if self._phase == 'approved':
+                self._phase = 'connected'
+            if self._phase in ('connected', 'offered'):
+                self._status = 'Selection sent. Choose the platform folder on the handheld.'
+            return 200, self._selection.manifest
+
+    def _check_offer(self):
+        with self._lock:
+            if not self._live():
+                raise SafetyError('Connection closed, cancelled or expired while preparing games.')
+
+    def offer(self, root, selected, profile, *, players=None):
+        """Hash off the UI thread. Only publish the complete snapshot to this connected peer."""
+        with self._lock:
+            if not self._live() or self._phase != 'connected' or self._selection is not None:
+                raise SafetyError('Choose games after both devices connect. Each session accepts one selection.')
+            self._phase, self._status = 'preparing', 'Connected. Checking the selected games before offering them.'
+        try:
+            with contextlib.ExitStack() as staged:
+                selection = _snapshot(root, selected, profile, players, staged, self._check_offer)
+                with self._lock:
+                    if not self._live():
+                        raise SafetyError('Connection closed, cancelled or expired while preparing games.')
+                    self._resources.enter_context(staged.pop_all())
+                    self._selection = selection
+                    self._phase, self._status = 'offered', 'Selection ready. Waiting for the handheld to request it.'
+        except BaseException:
+            with self._lock:
+                if self._live():
+                    self._phase, self._status = 'connected', 'Connected. Choose a valid selection and try again.'
+            raise
 
     def _begin_file(self, path, total):
         with self._lock:
@@ -372,15 +446,24 @@ class _Sender:
             with contextlib.suppress(OSError):
                 socket.socket.shutdown(sock, socket.SHUT_RDWR)
 
-    def _listen(self, listeners, resources):
+    def _listen(self, listeners):
         worker = None
         try:
             while not self.closed:
                 now = time.monotonic()
                 with self._lock:
-                    expiry, active, io_limit = min(self._until, self._idle), self._active, self._request_until
+                    expiry = min(self._until, self._idle, self._heartbeat)
+                    heartbeat_expired = now >= self._heartbeat
+                    active, io_limit = self._active, self._request_until
+                if self._cancel is not None and self._cancel.is_set():
+                    self._stop('closed', 'Wi-Fi sender closed.')
+                    break
                 if now >= expiry:
-                    self._stop('closed', 'Wi-Fi session expired. Open Send over Wi-Fi to start again.')
+                    if heartbeat_expired:
+                        self._stop('disconnected', 'Handheld stopped checking in. Reconnect both devices. '
+                                   'If Receive reported 202, update CouchCHD Receive first.')
+                    else:
+                        self._stop('closed', 'Wi-Fi session expired. Start a new connection to pair again.')
                     break
                 if active is not None and now >= io_limit:
                     self._interrupt(active)  # Absolute header/handshake limit, even when bytes trickle in.
@@ -418,31 +501,51 @@ class _Sender:
             self._released.set()
             if worker is not None:
                 worker.join()
-            resources.close()  # Keep the nofollow root fd pinned until the last reader releases it.
+            self._resources.close()  # Keep the nofollow root fd pinned until the last reader releases it.
+
+
+def _check_cancel(cancel):
+    if cancel is not None and cancel.is_set():
+        raise SafetyError('Wi-Fi send cancelled.')
+
+
+class _Selection(NamedTuple):
+    files: list
+    manifest: bytes
+
+
+def _snapshot(root, selected, profile, players, resources, check):
+    check()
+    system, files = resources.enter_context(platform_sources(root, selected, profile, players=players))
+    if len(files) > 10_000:
+        raise SafetyError('Select at most 10,000 files per Wi-Fi transfer.')
+    rows = [dict(id=i, path=path.as_posix(), size=source.size, sha256=_read_source(source, path, check=check).hex())
+            for i, (path, source) in enumerate(files)]
+    manifest = _json(dict(system=system, files=rows))
+    if len(manifest) > 4 * 1024 * 1024:
+        raise SafetyError('Transfer manifest exceeds 4 MiB; choose fewer games.')
+    check()
+    return _Selection(files, manifest)
+
+
+def _start(selection, resources, cancel):
+    _check_cancel(cancel)
+    iface = _lan()
+    ctx, fingerprint = _identity(iface.ip)
+    return _Sender(iface, ctx, fingerprint, selection, resources, cancel)
+
+
+def start_pairing(*, cancel: threading.Event | None = None):
+    """Open foreground discovery without access to any library. Call off the UI thread."""
+    return _start(None, contextlib.ExitStack(), cancel)
 
 
 def start_sender(root, selected, profile, *, players=None, cancel: threading.Event | None = None):
-    """Snapshot and hash selected files before opening a foreground session. Call off the UI thread."""
-    def check():
-        if cancel is not None and cancel.is_set():
-            raise SafetyError('Wi-Fi send cancelled.')
-
-    check()
+    """Game-first path: finish hashing before opening discovery, including for older receivers."""
     resources = contextlib.ExitStack()
     try:
-        system, files = resources.enter_context(platform_sources(root, selected, profile, players=players))
-        if len(files) > 10_000:
-            raise SafetyError('Select at most 10,000 files per Wi-Fi transfer.')
-        check()
-        iface = _lan()
-        rows = [dict(id=i, path=path.as_posix(), size=source.size, sha256=_read_source(source, path, check=check).hex())
-                for i, (path, source) in enumerate(files)]
-        manifest = _json(dict(system=system, files=rows))
-        if len(manifest) > 4 * 1024 * 1024:
-            raise SafetyError('Transfer manifest exceeds 4 MiB; choose fewer games.')
-        check()
-        ctx, fingerprint = _identity(iface.ip)
-        return _Sender(iface, ctx, fingerprint, files, manifest, resources, check)
+        selection = _snapshot(root, selected, profile, players, resources, lambda: _check_cancel(cancel))
+        return _start(selection, resources, cancel)
     except BaseException:
         resources.close()
         raise

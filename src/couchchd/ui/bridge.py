@@ -71,7 +71,7 @@ def _settings():
 
 
 def _discover():
-    return (profiles.roots(), profiles.default_systems(), profiles.default_preset(), profiles.is_recalbox(), profiles.is_pi())
+    return (profiles.roots(), profiles.default_systems(), profiles.default_preset(), profiles.is_recalbox(), profiles.host_kind())
 
 
 def _snapshot(backend):
@@ -227,6 +227,7 @@ class Bridge(QObject):
         self.psp_format = saved_format if saved_format in PSP_FORMATS else 'chd'
         self.scratch_dir = self.prefs.value('scratchDir', '', type=str)
         self.pi = self.recalbox = False
+        self._host_kind = 'computer'
         policy = self.prefs.value('cleanupPolicy', 'quarantine', type=str)
         self.policy = policy if policy in POLICIES else 'quarantine'
         self.sound = self.prefs.value('sound', False, type=bool)
@@ -271,6 +272,9 @@ class Bridge(QObject):
         self._progress.connect(self._report)
         self._item.connect(self._queue.update_item, Qt.ConnectionType.QueuedConnection)
         self._space.connect(self._set_space, Qt.ConnectionType.QueuedConnection)
+
+    @Property(str, notify=changed)
+    def hostKind(self): return self._host_kind
 
     @Property('QVariantMap', notify=transferChanged)
     def transferView(self): return self.tools.transfer
@@ -350,7 +354,8 @@ class Bridge(QObject):
     @Slot()
     def initialize(self):
         def ready(data):
-            self.candidates, self.recommended, default, self.recalbox, self.pi = data
+            self.candidates, self.recommended, default, self.recalbox, self._host_kind = data
+            self.pi = self._host_kind == 'pi'
             self.enabled_systems = set(self.recommended)
             if self.psp_format == 'cso':
                 self.enabled_systems.add('psp')
@@ -360,7 +365,7 @@ class Bridge(QObject):
             if root:
                 self._library(Path(root))
             else:
-                self._report('Choose the folder that contains your system folders.')
+                self._report('Connect a handheld or open a library to get started.')
                 self._draw(True)
         self._work('Detecting libraries', _discover, ready)
         if launcher := launcher_art.managed_launcher():
@@ -409,6 +414,8 @@ class Bridge(QObject):
         batch_failed = error is not None and self._busy == 'Compressing discs'
         self._busy = ''
         self.operationChanged.emit()
+        if done is None:
+            return  # The read-only picker was dismissed before its worker finished.
         try:
             if error is not None:
                 if batch_failed:
@@ -417,6 +424,10 @@ class Bridge(QObject):
                     self.queueChanged.emit()
                 self._report(str(error))
                 self._draw(False)
+                if self.tools.pairing_workflow:
+                    self._show('pack_source_error', 'Cannot open this source', str(error),
+                               [row('back', 'Choose another source')])
+                    return
                 self._notice('Operation stopped', str(error), alert=True)
             else:
                 done(result)
@@ -534,15 +545,17 @@ class Bridge(QObject):
                     if len(rows) == 1:
                         rows.append(row('scan', 'No matching issues', 'The last scan did not flag files in this view.', 'Rescan'))
             rows[0:0] = [
-                row('tool_export', 'Sync to handheld', 'Send games over Wi-Fi or copy them to a card.', 'Choose games'),
+                row('tool_devices', 'Connect a handheld', 'Open pairing, then tap Find sender in CouchCHD Receive.', 'Wi-Fi'),
                 row('catalog_open', 'Home libraries', 'Find ready games and originals across your saved folders.', 'Browse'),
+                row('tool_export', 'Prepare a game pack', 'Choose a player, then pick games for a card or Wi-Fi transfer.', 'Choose games'),
                 row('tool_plan', 'Make room on this card', 'Choose a space goal and preview the batch.', 'Plan'),
                 row('tool_health', 'Library health check', 'Find problems and see what to do next.', 'Check'),
             ]
             if self.backend is not None:
                 rows.append(row('scan', 'Scan library again', str(self.root)))
         elif self.tab == 1:
-            self._subtitle = 'Choose which systems to include in local and cloud batches.'
+            self._subtitle = 'Switch conversion on or off for a system. Inventory-only systems can be browsed in Home libraries.'
+            self._summary = f'{len(self.enabled_systems)} systems enabled for conversion'
             for key, name in scanner.SYSTEM_LABELS.items():
                 extensions = sorted(scanner.FORMATS[key])
                 inputs = ' / '.join(ext[1:].upper() for ext in extensions)
@@ -554,17 +567,20 @@ class Bridge(QObject):
                 if key in ('xbox', '3ds'):
                     detail += '  ·  Original always kept'
                 rows.append(row('system', name, detail, 'On' if key in self.enabled_systems else 'Off', key))
+            rows.extend(row('inventory_system', name, 'Browse these games in Home libraries. No conversion or export preset.',
+                            'Inventory only', key) for key, name in scanner.CATALOG_ONLY_LABELS.items())
         elif self.tab == 2:
             self._subtitle = 'PlayStation, Sega CD, Saturn and Dreamcast CHD sets can share a playlist.'
             rows = [row('playlist', Path(p).name, str(p), 'Inspect', p) for p in snap['playlists']]
             if not rows:
                 rows.append(row('scan', 'No playlists in this library', 'Convert a complete numbered CHD set for one of the supported systems.', 'Scan'))
         elif self.tab == 3:
-            self._summary = 'Sources and destinations'
-            self._subtitle = 'Find games on a home drive, send them to a handheld, or import originals for conversion.'
+            self._summary = 'Libraries, wireless devices and game packs'
+            self._subtitle = 'Home libraries are saved folders. Nearby handhelds are live Wi-Fi connections.'
             primary = 'Start ingest' if self.ingest and self.backend else 'Open catalog'
-            rows = [row('catalog_open', 'Home libraries', 'Browse games and originals on your drives and network shares.', 'Browse'),
-                    row('tool_export', 'Sync to handheld', 'Select games, then connect your handheld over Wi-Fi.', 'Choose games'),
+            rows = [row('catalog_open', 'Home libraries', 'Browse the last scan, including libraries that are now offline.', 'Browse'),
+                    row('tool_devices', 'Nearby handhelds', 'Make this computer visible to CouchCHD Receive.', 'Connect'),
+                    row('tool_export', 'Prepare a game pack', 'Set a device profile and choose games. No connection required.', 'Choose games'),
                     row('mount', 'Ingest from mounted folder', self.ingest or 'Browse a NAS, SMB, NFS, or external drive.', 'Browse'),
                     row('remotes', 'Configured rclone remotes', 'Lists the remotes already configured on this device.', 'Refresh')]
             if self.remote_names == []:
@@ -587,15 +603,20 @@ class Bridge(QObject):
         self.sceneChanged.emit(reset)
 
     def _show(self, kind, title, body, rows, *, reset=True):
-        if kind != 'pack_wifi':
-            self.tools.stop_wifi()
+        if not self.tools.keeps_wifi(kind, self._target):
+            self._leave_wifi()
         self._modal = {'kind': kind, 'title': str(title), 'body': str(body)}
         self._dialog_rows = rows
         self.changed.emit()
         self.sceneChanged.emit(reset)
 
-    def _hide(self):
+    def _leave_wifi(self):
+        if self.tools.pairing_workflow:
+            self._on_success = None  # A late picker result must not reopen a dismissed workflow.
         self.tools.stop_wifi()
+
+    def _hide(self):
+        self._leave_wifi()
         self._modal = None
         self._dialog_rows = []
         self._confirm = None
@@ -865,6 +886,11 @@ class Bridge(QObject):
             self._hide()
             if return_to: return_to()
             return
+        if self._busy and self.tools.pairing_workflow:
+            if kind == 'pack_wifi':
+                return self._hide()
+            self._on_success = None
+            return self.tools._return_wifi()
         if self._busy: return
         if kind in ('presets', 'policies', 'psp_formats'): return self._settings()
         if kind == 'browse':
@@ -890,7 +916,7 @@ class Bridge(QObject):
 
     @Slot()
     def exitPrompt(self):
-        if self._busy:
+        if self._busy and not self.tools.pairing_workflow:
             if self._busy == 'Compressing discs': self.back()
             else: self._report(f'{self._busy}. Wait for this operation before exiting.')
             return
@@ -903,7 +929,7 @@ class Bridge(QObject):
         if not 0 <= index < len(items): return
         item = items[index]
         key, arg = item['key'], item['arg']
-        if self._busy and not (self._modal and ((self._busy == 'Compressing discs' and
+        if self._busy and not (self._modal and (((self._busy == 'Compressing discs' or self._on_success is None) and
                                self._modal['kind'] == 'confirm' and key in ('accept', 'back'))
                                or (self._modal['kind'] == 'item' and key == 'back'))): return
         if key == 'accept':
@@ -914,6 +940,8 @@ class Bridge(QObject):
             return
         if key == 'back': return self.back()
         if key == 'note': return
+        if key == 'inventory_system':
+            return self._notice(scanner.CATALOG_ONLY_LABELS[arg], 'CouchCHD can identify this system in a home library. No conversion or handheld export preset is available; your original files stay untouched.')
         if key == 'lastqueue':
             self._queue_visible = True
             self.queueChanged.emit()
@@ -1035,7 +1063,8 @@ class Bridge(QObject):
         self._settings()
 
     def close(self):
-        self.tools.stop_wifi()
+        self._on_success = None
         self._cancel.set()
+        self.tools.close()
         self._pool.shutdown(wait=True, cancel_futures=True)
         self.prefs.sync()

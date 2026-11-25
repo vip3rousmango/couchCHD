@@ -13,14 +13,15 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 
-from . import handheld, scanner
+from . import archive7z, handheld, scanner
 from .ledger import SafetyError
 from .output_formats import SUFFIX_BY_MODE
-from .scanner import SYSTEMS, default_mode, library_root_allowed, safe_relative_name, visible_directory
+from .scanner import default_mode, folder_system, library_root_allowed, safe_relative_name, visible_directory
 
 _MAX_PLAYLIST = 1024 * 1024
 _REMOTE = re.compile(r'([A-Za-z0-9_][A-Za-z0-9_. -]*):(.*)\Z')
-_ROM_SUFFIXES = frozenset(ext for exts in scanner.FORMATS.values() for ext in exts) | {
+_ROM_SUFFIXES = frozenset(ext for table in (scanner.FORMATS, scanner.CATALOG_ONLY_FORMATS)
+                          for exts in table.values() for ext in exts) | {
     '.zip', '.rar', '.7z', '.chd', '.cso', '.rvz', '.m3u', '.pbp', '.cdi', '.ecm', '.wbfs',
 }
 # Prune excluded directory trees on the provider, not after fetching every row.
@@ -48,39 +49,42 @@ class Discovery:
     unplaced: int
     unsupported: int
     invalid_playlists: int = 0
+    unplaced_examples: str = ''
 
 
 @dataclass
 class _Inventory:
     files: dict = field(default_factory=dict)
-    originals: list[Game] = field(default_factory=list)
+    listed: list[Game] = field(default_factory=list)
     directories: int = 0
     platform_folders: int = 0
     unplaced: int = 0
     unsupported: int = 0
+    unplaced_examples: dict[Path, str] = field(default_factory=dict)
 
     def add(self, key, kind, file):
         if '.chd_discs' in key.parts and kind != 'image':
             return
         if kind == 'unplaced':
             self.unplaced += 1
+            if len(self.unplaced_examples) < 3:
+                self.unplaced_examples.setdefault(key.parent, key.as_posix())
         elif kind == 'unsupported':
             self.unsupported += 1
-        elif kind == 'original':
-            self.originals.append(Game(key.as_posix(), file.size, (), 'original'))
+        elif kind in ('original', 'catalog_only'):
+            self.listed.append(Game(key.as_posix(), file.size, (), kind))
         else:
             self.files[key] = file
 
 
 def _platform(key):
     """A wrapper is not a system, and conflicting platform names are not a route."""
-    found = None
-    for i, part in enumerate(key.parts[:-1]):
-        if (system := SYSTEMS.get(part.casefold())):
-            if found is not None:
-                return None
-            found = i, system
-    return found
+    found = scanner.platform_component(key.parts[:-1], unique=True)
+    if found:
+        index, folder = found
+        if system := scanner.file_system(folder, key):
+            return index, system
+    return None
 
 
 def system_for(relative: str) -> str:
@@ -103,6 +107,14 @@ def _kind(key):
     index, system = platform
     if '.chd_discs' in key.parts[:index]:
         return None
+    if system in scanner.CATALOG_ONLY_FORMATS:
+        if ext == '.bin' and system == 'atarijaguarcd':
+            return None  # A possible disc track, not a standalone inventory entry.
+        return 'catalog_only' if ext in scanner.CATALOG_ONLY_FORMATS[system] else 'unsupported'
+    if system in archive7z.FORMATS and ext in ('.zip', '.bin', '.rom'):
+        return 'catalog_only'  # Name and placement only; never open the archive or promise playback.
+    if ext == '.bin':
+        return None  # Loose disc tracks aren't standalone games or unsupported disc images.
     if ext == '.m3u':
         return 'playlist'
     suffix = SUFFIX_BY_MODE[default_mode(system, '')]
@@ -134,14 +146,14 @@ def _raise(exc):
 class _Mounted:
     def __init__(self, root, fd):
         self.root, self.fd = root, fd
-        self.prefix = Path(root.name) if root.name.casefold() in SYSTEMS else Path()
+        self.prefix = Path(root.name) if folder_system(root.name) else Path()
 
     def inventory(self):
         result = _Inventory()
         for base, dirs, names, fd in os.fwalk('.', dir_fd=self.fd, onerror=_raise, follow_symlinks=False):
             dirs[:] = [d for d in dirs if _portable_directory(d)]
             result.directories += 1
-            result.platform_folders += (self.prefix / base).name.casefold() in SYSTEMS
+            result.platform_folders += bool(folder_system((self.prefix / base).name))
             for name in names:
                 path = Path(base) / name
                 key = self.prefix / path
@@ -195,7 +207,7 @@ class _Remote:
             raise SafetyError('Install rclone for this configured remote, or select its mounted ROM folder.')
         self.base = name + ':' + base
         folder = Path(base).name
-        self.prefix = Path(folder) if folder.casefold() in SYSTEMS else Path()
+        self.prefix = Path(folder) if folder_system(folder) else Path()
         self.directories = {}
 
     def _args(self, command, *flags, path=None):
@@ -246,7 +258,7 @@ class _Remote:
             if row.get('IsDir') is True:
                 if all(map(_directory, path.parts)):
                     result.directories += 1
-                    result.platform_folders += path.name.casefold() in SYSTEMS
+                    result.platform_folders += bool(folder_system(path.name))
                 continue
             key = self.prefix / path
             if not (kind := _kind(key)):
@@ -372,7 +384,7 @@ def discover(location: str | Path, *, expected_root=None) -> Discovery:
     """Read metadata and bounded playlist text only; never probe discs, archives or loose tracks."""
     with _open(location, expected_root) as store:
         inventory = store.inventory()
-        games = inventory.originals
+        games = inventory.listed
         invalid_playlists = 0
         grouped = set()
         for key, file in inventory.files.items():
@@ -394,7 +406,7 @@ def discover(location: str | Path, *, expected_root=None) -> Discovery:
             store.check(())  # Never cache a listing of a disconnected mount.
         return Discovery(sorted((g for g in games if g.relative not in grouped), key=lambda g: g.relative),
                          inventory.directories, inventory.platform_folders, inventory.unplaced, inventory.unsupported,
-                         invalid_playlists)
+                         invalid_playlists, '\n'.join(inventory.unplaced_examples.values()))
 
 
 def list_games(location: str | Path, *, expected_root=None) -> list[Game]:
@@ -440,12 +452,12 @@ def destination_paths(destination, members) -> tuple[Path, ...]:
     root = handheld.safe_absolute(destination)
     if not library_root_allowed(root):
         raise SafetyError(f'Excluded destination folder: {root}')
-    direct = SYSTEMS.get(root.name.casefold())
+    direct = folder_system(root.name)
     folders = {}
     if not direct:
         with handheld.open_directory(root) as fd:
             for name in os.listdir(fd):
-                if (system := SYSTEMS.get(name.casefold())):
+                if (system := folder_system(name)):
                     folders[system] = None if system in folders else name
     result = []
     for member in members:

@@ -177,6 +177,42 @@ def test_discovery_and_mounted_ingest_agree_on_cartridges_and_exclusions(tmp_pat
         assert list(stream) == [] and not staged.source.exists()
 
 
+def test_human_system_names_route_mounted_scans_without_enabling_inventory_only_formats(tmp_path):
+    root, scratch = tmp_path.resolve() / 'roms', tmp_path / 'scratch'
+    folder = root / 'Master/Sega - Saturn'
+    game, track = disc(folder / 'Japan', 'Disc')
+    for name in ('Atari/Game.a26', 'Atari - 7800/Game.zip', 'Sega 32/Game.32x', 'sega32x/Game.7z'):
+        put(root / name, b'never staged')
+    put(root / 'bios/Sega - Saturn/Bad.cue', _CUE)
+    assert [g.source for g in scanner.scan(root)[0]] == [game]
+    assert scanner.scan(root / 'Atari - 7800') == ([], [])
+    assert scanner.library_system(root, root / 'Atari/Game.a26') == 'atari2600'
+    with pytest.raises(ValueError, match='No converter'):
+        scanner.default_mode('atari2600', '.a26')
+    assert not scanner.library_system(root, root / 'Atari/Game.zip')
+    with closing(cloud_ingest.games(str(folder), scratch, set(scanner.CATALOG_LABELS), threading.Event())) as stream:
+        staged, output, key = next(stream)
+        assert (staged.system, output, key) == ('saturn', Path('saturn/Japan/Disc.chd'), str(game))
+        assert list(stream) == []
+    assert game.read_bytes() == _CUE and track.stat().st_size == 2352
+
+
+def test_remote_ingest_resolves_exact_aliases_but_never_picks_a_colliding_title(tmp_path, monkeypatch):
+    rom = b'NES\x1a' + bytes([1]) + bytes(11 + 16384)
+    good = 'No-Intro/Nintendo - Nintendo Entertainment System/USA/Good.nes'
+    duplicates = ['US/Nintendo - NES/First/Game.nes', 'Backup/nes/Game.nes']
+    objects = dict.fromkeys([good, *duplicates, 'Atari/Game.a26', 'Sega - 32X/Game.zip'], rom)
+    actions = remote_transport(monkeypatch, objects)
+    issues = []
+    with closing(cloud_ingest.games('vault:', tmp_path, set(scanner.CATALOG_LABELS),
+                                    threading.Event(), on_issue=issues.append)) as stream:
+        staged, output, key = next(stream)
+        assert (staged.system, output, key) == ('nes', Path('nes/USA/Good.7z'), 'vault:' + good)
+        assert list(stream) == []
+    assert actions == [good] and len(issues) == 2
+    assert all(any(path in issue for issue in issues) for path in duplicates)
+
+
 def test_linked_system_is_reported_without_traversal(tmp_path):
     root = tmp_path.resolve() / 'library'
     external = tmp_path.resolve() / 'actual/pcfx'

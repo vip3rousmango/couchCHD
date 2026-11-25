@@ -18,6 +18,7 @@ from couchchd import handheld, wifi_sender
 
 @pytest.fixture
 def lan(monkeypatch):
+    monkeypatch.setattr(wifi_sender, 'host_kind', lambda: 'computer')
     monkeypatch.setattr(wifi_sender, '_lan', lambda: ipaddress.IPv4Interface('127.0.0.1/8'))
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
         probe.bind(('127.0.0.1', 0))
@@ -57,6 +58,7 @@ def request(destination, pin, method, path, token=None, *, device=None):
 
 def test_only_approved_receiver_reads_selected_snapshot(tmp_path, lan, monkeypatch):
     monkeypatch.setattr(socket, 'gethostname', lambda: 'Deck<OLED>.private.lan')
+    monkeypatch.setattr(wifi_sender, 'host_kind', lambda: 'deck')
     folder = tmp_path / 'PS1' / 'Set'
     (folder / '.chd_discs').mkdir(parents=True)
     disc = b'Disc data'
@@ -82,6 +84,7 @@ def test_only_approved_receiver_reads_selected_snapshot(tmp_path, lan, monkeypat
         raw = hashlib.sha256(bytes.fromhex(pin + token)).hexdigest()[:12]
         assert sender.pair_code == json.loads(body)['code'] == f'{raw[:4]}-{raw[4:8]}-{raw[8:]}'
         assert json.loads(body)['host'] == 'Deck OLED'
+        assert json.loads(body)['kind'] == 'deck'
         paired = dict(initial, phase='pairing', peer='127.0.0.1', device='Anbernic RG405M 32GB')
         assert sender.transfer == paired
         for secret in (token, raw, sender.pair_code, pin, str(tmp_path)):
@@ -93,7 +96,7 @@ def test_only_approved_receiver_reads_selected_snapshot(tmp_path, lan, monkeypat
         sender.approve()
         assert not sender.pair_code
         connected = dict(paired, phase='connected')
-        assert sender.transfer == connected
+        assert sender.transfer == dict(paired, phase='approved')
         assert request(address, pin, 'POST', '/pair', other, device='Impostor') == (409, b'')
         assert request(address, pin, 'GET', '/manifest', other)[0] == 403
         status, body = request(address, pin, 'GET', '/manifest', token)
@@ -261,3 +264,125 @@ def test_back_interrupts_hashing_without_opening_listener(tmp_path, lan, monkeyp
     with pytest.raises(ValueError, match='cancelled'):
         wifi_sender.start_sender(platform, 'Game.chd', 'rg405m', cancel=cancel)
     assert len(reads) == 1 and 0 < reads[0] < (platform / 'Game.chd').stat().st_size
+
+
+def test_pair_first_requires_both_approvals_then_one_explicit_offer(tmp_path, lan):
+    platform = tmp_path / 'psx'
+    platform.mkdir()
+    (platform / 'Game.chd').write_bytes(b'selected')
+    (platform / 'Other.chd').write_bytes(b'private')
+    token, other = secrets.token_hex(32), secrets.token_hex(32)
+    sender = wifi_sender.start_pairing()
+    try:
+        address, pin = discover(lan)
+        assert request(address, pin, 'POST', '/pair', token)[0] == 200
+        assert request(address, pin, 'GET', '/manifest', token)[0] == 403
+        sender.approve()
+        assert sender.transfer['phase'] == 'approved'
+        with pytest.raises(ValueError):
+            sender.offer(platform, 'Game.chd', 'rg405m')
+        assert request(address, pin, 'GET', '/manifest', other)[0] == 403
+        assert request(address, pin, 'POST', '/disconnect', other)[0] == 403
+        assert request(address, pin, 'POST', '/done', other)[0] == 403
+        assert sender.transfer['phase'] == 'approved'
+        assert request(address, pin, 'GET', '/manifest', token) == (202, b'{"state":"waiting"}')
+        assert 'update CouchCHD Receive' in sender.status  # preview.19 can't wait for a 202 offer.
+        assert sender.transfer['phase'] == 'connected'
+        assert request(address, pin, 'GET', '/file/0', token)[0] == 404
+        assert request(address, pin, 'POST', '/done', token)[0] == 409
+        with pytest.raises(ValueError):
+            sender.offer(platform, '../Other.chd', 'rg405m')
+        assert sender.transfer['phase'] == 'connected'
+        sender.offer(platform, 'Game.chd', 'rg405m')
+        assert sender.transfer['phase'] == 'offered'
+        with pytest.raises(ValueError):
+            sender.offer(platform, 'Other.chd', 'rg405m')
+        status, body = request(address, pin, 'GET', '/manifest', token)
+        assert status == 200 and json.loads(body) == {'system': 'psx', 'files': [
+            {'id': 0, 'path': 'Game.chd', 'size': 8, 'sha256': hashlib.sha256(b'selected').hexdigest()}]}
+        assert request(address, pin, 'GET', '/file/0', token) == (200, b'selected')
+        assert request(address, pin, 'GET', '/file/1', token)[0] == 404
+        assert request(address, pin, 'POST', '/done', token)[0] == 200
+        assert sender.closed
+    finally:
+        sender.close()
+
+
+@pytest.mark.parametrize('departure', ['disconnect', 'cancel', 'timeout'])
+def test_departure_during_hash_never_publishes_offer(tmp_path, lan, monkeypatch, departure):
+    platform = tmp_path / 'psx'
+    platform.mkdir()
+    (platform / 'Game.chd').write_bytes(b'disc')
+    entered, resume, cancel = threading.Event(), threading.Event(), threading.Event()
+    now = 100.0
+    monkeypatch.setattr(wifi_sender, 'time', SimpleNamespace(monotonic=lambda: now))
+    original = wifi_sender._read_source
+
+    def hash_disc(*args, **kwargs):
+        digest = original(*args, **kwargs)
+        entered.set()
+        assert resume.wait(5)
+        return digest
+
+    monkeypatch.setattr(wifi_sender, '_read_source', hash_disc)
+    sender = wifi_sender.start_pairing(cancel=cancel)
+    failures = []
+
+    def prepare():
+        try:
+            sender.offer(platform, 'Game.chd', 'rg405m')
+        except ValueError as error:
+            failures.append(str(error))
+
+    worker = threading.Thread(target=prepare)
+    try:
+        address, pin = discover(lan)
+        token = secrets.token_hex(32)
+        assert request(address, pin, 'POST', '/pair', token)[0] == 200
+        sender.approve()
+        assert request(address, pin, 'GET', '/manifest', token)[0] == 202
+        worker.start()
+        assert entered.wait(3)
+        assert sender.transfer['phase'] == 'preparing'
+        with pytest.raises(ValueError):
+            sender.offer(platform, 'Game.chd', 'rg405m')
+        assert request(address, pin, 'POST', '/done', token)[0] == 409
+        assert request(address, pin, 'GET', '/file/0', token)[0] == 404
+        # Authenticated polling keeps even a long source hash live.
+        for _ in range(2):
+            now += wifi_sender._HEARTBEAT_SECONDS - 1
+            assert request(address, pin, 'GET', '/manifest', token) == (202, b'{"state":"preparing"}')
+        if departure == 'disconnect':
+            assert request(address, pin, 'POST', '/disconnect', token) == (200, b'')
+        elif departure == 'cancel':
+            cancel.set()
+        else:
+            now += wifi_sender._HEARTBEAT_SECONDS + 1
+        resume.set()
+        worker.join(3)
+        assert not worker.is_alive() and failures
+        until = time.monotonic() + 3
+        while not sender.closed and time.monotonic() < until:
+            time.sleep(.02)
+        assert sender.closed
+        assert sender.transfer['phase'] == ('closed' if departure == 'cancel' else 'disconnected')
+    finally:
+        resume.set()
+        if worker.ident is not None:
+            worker.join(3)
+        sender.close()
+
+
+def test_candidate_can_withdraw_before_host_approval(lan):
+    token = secrets.token_hex(32)
+    sender = wifi_sender.start_pairing()
+    try:
+        address, pin = discover(lan)
+        assert request(address, pin, 'POST', '/pair', token)[0] == 200
+        assert request(address, pin, 'POST', '/disconnect', secrets.token_hex(32))[0] == 403
+        assert sender.pair_code
+        assert request(address, pin, 'POST', '/disconnect', token)[0] == 200
+        assert sender.closed and not sender.pair_code
+        assert sender.transfer['phase'] == 'disconnected'
+    finally:
+        sender.close()

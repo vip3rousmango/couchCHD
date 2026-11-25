@@ -192,6 +192,57 @@ def test_nested_platforms_keep_distinct_sources_and_never_promote_originals(tmp_
     assert {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob('*') if p.is_file()} == data
 
 
+def test_named_system_folders_and_catalog_only_games_keep_exact_source_paths(tmp_path):
+    root = tmp_path / 'Master'
+    expected = {
+        'No-Intro/Nintendo - Game Boy Advance/USA/One.gba': ('gba', 'original'),
+        'No-Intro/Nintendo - Game Boy Advance/USA/Two.zip': ('gba', 'catalog_only'),
+        'Redump/Sony - PlayStation Portable/Game.iso': ('psp', 'original'),
+        'Sega Saturn/Japan/Game.cue': ('saturn', 'original'),
+        'Nintendo - Game Boy (GB)/Demo.gb': ('gb', 'original'),
+        'Sega_32/Example.bin': ('sega32x', 'catalog_only'),
+        'Atari/2600/Game.zip': ('atari2600', 'catalog_only'),
+        'Atari/Unsorted/Game.a52': ('atari5200', 'catalog_only'),
+        'Atari/Unsorted/Game.a78': ('atari7800', 'catalog_only'),
+        'Atari/Unsorted/Game.atr': ('atari800', 'catalog_only'),
+        'Atari/Unsorted/Game.stx': ('atarist', 'catalog_only'),
+        'Atari/Unsorted/Game.lnx': ('atarilynx', 'catalog_only'),
+        'Atari/Unsorted/Game.j64': ('atarijaguar', 'catalog_only'),
+        'Atari - Jaguar CD/Game.cue': ('atarijaguarcd', 'catalog_only'),
+        'Atari_7800/Player.7z': ('atari7800', 'catalog_only'),
+    }
+    unclear = {'Atari/Mixed/Game' + ext for ext in ('.zip', '.iso', '.rom', '.bin', '.car')} | {
+        'Sega 32 games/Unsorted.zip', 'Mystery/Game.iso', 'Nintendo - Game Boy (PS2)/Demo.zip',
+        'Sony - PlayStation Portable/Nintendo - Game Boy Advance/Conflict.zip'}
+    for path in (*expected, *unclear, 'bios/Atari/Game.a78', 'Atari/.hidden/Game.a26'):
+        disc(root, path, b'read-only inventory')
+    shelf = catalog.Catalog(tmp_path / 'index.sqlite3')
+    source = shelf.add('Home', root)
+    scanned, = shelf.refresh(source.id)
+    assert {e.relative: (e.system, e.kind) for e in shelf.entries()} == expected
+    assert scanned.unplaced == len(unclear) and scanned.unsupported == 0
+    assert set(scanned.unplaced_examples.splitlines()) <= unclear and scanned.unplaced_examples
+    dest = tmp_path / 'dest'
+    dest.mkdir()
+    for path, (_, kind) in expected.items():
+        if kind == 'catalog_only':
+            with pytest.raises(ValueError, match='Not a selectable'):
+                shelf.pull(source.id, path, dest)
+    assert not list(dest.iterdir())
+
+
+def test_direct_atari_root_reports_ambiguous_archive_without_reading_it(tmp_path):
+    root = tmp_path / 'Atari'
+    disc(root, 'A.a26', b'cart')
+    disc(root, 'Unsorted/A.zip', b'not opened')
+    shelf = catalog.Catalog(tmp_path / 'index.sqlite3')
+    source = shelf.add('Atari shelf', root)
+    scanned, = shelf.refresh(source.id)
+    entry, = shelf.entries()
+    assert (entry.relative, entry.system, entry.kind) == ('Atari/A.a26', 'atari2600', 'catalog_only')
+    assert (scanned.unplaced, scanned.platform_folders, scanned.unplaced_examples) == (1, 1, 'Atari/Unsorted/A.zip')
+
+
 def test_offline_remote_retains_inventory_without_storing_command_errors(tmp_path, monkeypatch):
     shelf = catalog.Catalog(tmp_path / 'catalog.sqlite3')
     monkeypatch.setattr(catalog.cloud_ingest, 'remotes', lambda: ['pi:'])
@@ -288,6 +339,24 @@ def test_controller_save_scans_empty_parent_then_refresh_finds_readonly_original
     controls.activate('catalog_ingest', '')
     assert screen.ingest == str(root) and screen.tab == 3 and screen.kind is None
     assert original.read_bytes() == b'not content-verified'
+    archived = disc(root, 'Sega 32/Game.7z', b'not opened')
+    ambiguous = disc(root, 'Atari/Game.zip', b'not opened')
+    controls.activate('catalog_source', source)
+    controls.activate('catalog_refresh_source', '')
+    assert '1 inventory only' in screen.body
+    controls.activate('catalog_unplaced', '')
+    assert 'Atari' in screen.body and str(ambiguous) == screen.rows[0]['detail']
+    assert controls.back('catalog_unplaced') and screen.kind == 'catalog_source'
+    controls.activate('catalog_systems', source)
+    assert {r['label'] for r in screen.rows} == {'PlayStation Portable', 'Sega 32X'}
+    controls.activate('catalog_system', 'sega32x')
+    choice, = screen.rows
+    assert choice['value'] == 'Inventory only'
+    controls.activate(choice['key'], choice['arg'])
+    location, = screen.rows
+    controls.activate(location['key'], location['arg'])
+    assert str(archived) in screen.body and 'compatibility have not been checked' in screen.body
+    assert [r['key'] for r in screen.rows] == ['back']
 
 
 def test_default_catalog_lives_in_xdg_or_persistent_recalbox_data(tmp_path, monkeypatch):

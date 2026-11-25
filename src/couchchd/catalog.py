@@ -27,6 +27,7 @@ class Source:
     unplaced: int
     unsupported: int
     invalid_playlists: int
+    unplaced_examples: str = ''
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +43,7 @@ class Entry:
 
 
 _SOURCE_FIELDS = ('id, name, location, status, last_seen, error, directories, platform_folders, '
-                  'unplaced, unsupported, invalid_playlists')
+                  'unplaced, unsupported, invalid_playlists, unplaced_examples')
 _RECALBOX_SYSTEM = Path('/recalbox/share/system')
 _MOUNTINFO = Path('/proc/self/mountinfo')
 _ESCAPE = re.compile(rb'\\([0-7]{3})')
@@ -125,11 +126,11 @@ class Catalog:
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         os.close(fd)
         with self._connection() as db:
-            if not db.execute('PRAGMA user_version').fetchone()[0]:
+            if db.execute('PRAGMA user_version').fetchone()[0] < 2:
                 db.executescript(_SCHEMA)
-                # Recheck under BEGIN IMMEDIATE in case another process opened this
-                # preview.18 index first. A failed upgrade rolls back as a unit.
-                if not db.execute('PRAGMA user_version').fetchone()[0]:
+                # Recheck under BEGIN IMMEDIATE: another process may have just migrated the index.
+                version = db.execute('PRAGMA user_version').fetchone()[0]
+                if not version:
                     db.execute('ALTER TABLE source ADD COLUMN directories INTEGER')
                     for name in ('platform_folders', 'unplaced', 'unsupported', 'invalid_playlists'):
                         db.execute(f'ALTER TABLE source ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
@@ -138,7 +139,9 @@ class Catalog:
                     # conflicting system ancestors. Never offer those as ready.
                     db.create_function('eligible', 1, lambda key: catalog_transport.selectable_output(Path(key)))
                     db.execute('DELETE FROM entry WHERE NOT eligible(relative)')
-                    db.execute('PRAGMA user_version=1')
+                if version < 2:
+                    db.execute("ALTER TABLE source ADD COLUMN unplaced_examples TEXT NOT NULL DEFAULT ''")
+                    db.execute('PRAGMA user_version=2')
 
     @contextmanager
     def _connection(self):
@@ -200,10 +203,11 @@ class Catalog:
             return
         with self._connection() as db:
             if not db.execute("UPDATE source SET status='online',last_seen=?,error='',mountpoint=?,"
-                              'directories=?,platform_folders=?,unplaced=?,unsupported=?,invalid_playlists=? '
+                              'directories=?,platform_folders=?,unplaced=?,unsupported=?,invalid_playlists=?,unplaced_examples=? '
                               'WHERE id=? AND generation=?',
                               (time.time(), before[0] if before else None, snapshot.directories, snapshot.platform_folders,
-                               snapshot.unplaced, snapshot.unsupported, snapshot.invalid_playlists, *version)).rowcount:
+                               snapshot.unplaced, snapshot.unsupported, snapshot.invalid_playlists,
+                               snapshot.unplaced_examples, *version)).rowcount:
                 return
             db.execute('DELETE FROM entry WHERE source_id=?', (source_id,))
             db.executemany('INSERT INTO entry (source_id,relative,size,kind) VALUES (?,?,?,?)',

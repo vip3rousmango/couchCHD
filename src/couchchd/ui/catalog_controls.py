@@ -34,25 +34,27 @@ def _count(n, singular, plural=None):
     return f'{n} {singular if n == 1 else plural or singular + "s"}'
 
 
-def _scan_detail(source, ready, originals):
+def _scan_detail(source, ready, originals, inventory_only=0):
     if source.last_seen is None:
         return ('Reconnect this source and refresh it.' if source.status == 'offline' else
                 'Refresh this library to scan its folders.')
     copies = f'{ready} ready to copy' if source.status == 'online' else _count(ready, 'cached copy', 'cached copies')
     parts = [f'{copies} · {_count(originals, "original")}']
+    if inventory_only:
+        parts[0] += f' · {inventory_only} inventory only'
     if source.directories is None:
         parts.append('Older saved list. Refresh to find originals and scan details.')
     else:
         parts.append(f'{_count(source.directories, "folder")} scanned.')
         if source.unplaced:
             parts.append(f'{_count(source.unplaced, "file")} without a clear system. '
-                         'Use one platform folder such as psx, psp or dreamcast per game path.')
+                         'Use a specific platform folder, such as Sony - PlayStation Portable or Atari 2600.')
         if source.unsupported:
             parts.append(f'{_count(source.unsupported, "file")} in an unsupported format for its platform. '
                          'For archived discs, use a single-disc ZIP or unpack a working copy.')
         if source.invalid_playlists:
             parts.append(f'{_count(source.invalid_playlists, "unusable playlist")}. Check the disc filenames and paths.')
-        if not (ready or originals or source.unplaced or source.unsupported or source.invalid_playlists):
+        if not (ready or originals or inventory_only or source.unplaced or source.unsupported or source.invalid_playlists):
             parts.append('No eligible games in the platform folders. BIN or RAW tracks need their CUE or GDI sheet.'
                          if source.platform_folders else
                          'No supported platform folder found. Choose a platform folder or its parent.')
@@ -64,7 +66,7 @@ def _full_path(source, relative):
     base = location if Path(location).is_absolute() else location.partition(':')[2]
     key = Path(relative)
     # Direct platform roots use a virtual leading system component in the CLI key.
-    if Path(base).name.casefold() in scanner.SYSTEMS:
+    if scanner.folder_system(Path(base).name) and key.parts and key.parts[0] == Path(base).name:
         key = key.relative_to(Path(base).name)
     return location + ('' if location.endswith(('/', ':')) else '/') + key.as_posix()
 
@@ -114,13 +116,24 @@ class CatalogControls:
         if source is None:
             return self._home()
         counts = Counter(e.kind for entries in self.files.values() for e in entries if e.source_id == source.id)
-        body = f'{source.location}\n{_status(source)}\n{_scan_detail(source, counts["output"], counts["original"])}'
+        details = _scan_detail(source, counts['output'], counts['original'], counts['catalog_only'])
+        body = f'{source.location}\n{_status(source)}\n{details}'
         if source.status == 'offline' and source.error:
             body += f'\n{source.error}'
-        self.ui._show('catalog_source', source.name, body, [
-            _action('systems', 'Browse games & originals', 'View the last successful scan by platform.', arg=source.id),
-            _action('refresh_source', 'Refresh this library', 'Scan its folders again. Source files stay untouched.'),
-            _action('forget', 'Forget this library', 'Remove this source from the catalog on this device only.')])
+        rows = [_action('systems', 'Browse games & originals', 'View the last successful scan by platform.', arg=source.id)]
+        if source.unplaced_examples:
+            rows.append(_action('unplaced', 'Show unclassified examples', 'See paths from the last successful scan.'))
+        rows.extend([_action('refresh_source', 'Refresh this library', 'Scan its folders again. Source files stay untouched.'),
+                     _action('forget', 'Forget this library', 'Remove this source from the catalog on this device only.')])
+        self.ui._show('catalog_source', source.name, body, rows)
+
+    def _unplaced(self):
+        source = self.sources[self.selected]
+        examples = source.unplaced_examples.split('\n') if source.unplaced_examples else ()
+        self.ui._show('catalog_unplaced', 'Unclassified files',
+                      'These paths have no single identifiable system. A folder named Atari covers several machines; '
+                      'a ZIP, ISO, ROM or BIN does not identify which one. These files were not opened or moved.',
+                      [row('note', Path(key).name, _full_path(source, key)) for key in examples] + [row('back', 'Back to library')])
 
     def _add(self):
         self.ui._show('catalog_add', 'Add a library', 'Choose a platform folder or a parent containing your collection. CouchCHD scans inside it without changing files.', [
@@ -187,10 +200,10 @@ class CatalogControls:
         counts = Counter(entries[0].system for _, entries in self._scoped())
         source = self.sources.get(self.scope)
         title = source.name if source else 'All libraries'
-        rows = [_action('system', scanner.SYSTEM_LABELS.get(system, system), '', str(count), system)
+        rows = [_action('system', scanner.CATALOG_LABELS[system], '', str(count), system)
                 for system, count in sorted(counts.items())]
         if rows:
-            body = 'Choose a platform. Compressed copies and originals are listed separately by file.'
+            body = 'Choose a platform to browse compressed copies, conversion candidates and inventory-only files.'
         elif source:
             body = _scan_detail(source, 0, 0)
         else:
@@ -205,10 +218,12 @@ class CatalogControls:
                 continue
             if entries[0].kind == 'original':
                 label = 'Needs conversion'
+            elif entries[0].kind == 'catalog_only':
+                label = 'Inventory only'
             else:
                 label = 'Ready to copy' if any(e.status == 'online' for e in entries) else 'Cached copy'
             rows.append(_action('locations', Path(relative).name, relative, label, relative))
-        self.ui._show('catalog_games', scanner.SYSTEM_LABELS[self.system],
+        self.ui._show('catalog_games', scanner.CATALOG_LABELS[self.system],
                       'Choose a file to see its location and next step.', rows or [row('back', 'No games left in this listing')])
 
     def _locations(self):
@@ -230,6 +245,10 @@ class CatalogControls:
         if original:
             body += '\nOriginal detected by name, not a compressed copy. Ingest validates inputs before conversion.'
         rows = [row('back', 'Go back')]
+        if entry.kind == 'catalog_only':
+            body += (f'\n{_status(source)}\nIdentified from its folder or filename. CouchCHD does not convert or '
+                     'copy this format. The file contents and player compatibility have not been checked.')
+            return self.ui._show('catalog_preview', 'Inventory only', body, rows)
         if source.status != 'online':
             body += f'\n{_status(source)}. Reconnect this source and refresh it.'
             rows.append(_action('recheck', 'Refresh this location'))
@@ -301,6 +320,8 @@ class CatalogControls:
             case 'catalog_source':
                 self.selected = arg
                 self._source()
+            case 'catalog_unplaced':
+                self._unplaced()
             case 'catalog_refresh_all' | 'catalog_refresh_source' | 'catalog_recheck':
                 target = None if key == 'catalog_refresh_all' else self.selected
                 after = {'catalog_refresh_all': self._home, 'catalog_refresh_source': self._source,
@@ -385,6 +406,7 @@ class CatalogControls:
         match kind:
             case 'catalog_home': self.ui._hide()
             case 'catalog_source' | 'catalog_add': self._home()
+            case 'catalog_unplaced': self._source()
             case 'catalog_remotes': self._add()
             case 'catalog_folders': self.activate('catalog_remotes', '')
             case 'catalog_names':

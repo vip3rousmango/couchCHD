@@ -11,7 +11,7 @@ import warnings
 import xml.etree.ElementTree as ET
 
 from .ledger import Ledger, SafetyError
-from .scanner import SYSTEMS
+from .scanner import folder_system
 
 
 _DISC = re.compile(r'^(?P<title>.+?)\s*\((?:Disc|Disk|CD)\s*(?P<n>[0-9]{1,3})(?:\s*of\s*(?P<total>[0-9]{1,3}))?\)(?P<variant>.*)$', re.I)
@@ -232,7 +232,7 @@ def organize(root: Path, batch: int, ledger: Ledger, outputs: list[Path]) -> lis
     for path in outputs:
         p = Path(path)
         p = p if p.is_absolute() else root / p
-        if p.suffix.casefold() != '.chd' or SYSTEMS.get(p.parent.name.casefold()) not in PLAYLIST_SYSTEMS:
+        if p.suffix.casefold() != '.chd' or folder_system(p.parent.name) not in PLAYLIST_SYSTEMS:
             continue
         d = _disc(p.stem)
         if d:

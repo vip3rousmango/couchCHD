@@ -28,10 +28,10 @@ def _already_published(output, known):
 
 
 def _ingest_folder(root, system):
-    if scanner.SYSTEMS.get(root.name.casefold()) == system:
+    if scanner.folder_system(root.name) == system:
         return root
     candidates = [p for p in root.iterdir()
-                  if scanner.SYSTEMS.get(p.name.casefold()) == system and (p.is_dir() or p.is_symlink())]
+                  if scanner.folder_system(p.name) == system and (p.is_dir() or p.is_symlink())]
     if len(candidates) > 1:
         raise ValueError(f'Multiple {system} folders; select one as the destination library.')
     return candidates[0] if candidates else root / system
@@ -160,7 +160,7 @@ class Backend:
             raise ValueError('Immediate cleanup is only available for local, verified quarantine jobs.')
         if systems is None:
             systems = set(scanner.SYSTEM_LABELS) if plan_target is not None else profiles.default_systems(psp_format)
-        if ingest and (root_system := scanner.SYSTEMS.get(self.root.name.casefold())):
+        if ingest and (root_system := scanner.folder_system(self.root.name)):
             systems = set(systems).intersection({root_system})
             if not systems:
                 raise ValueError(f'This destination accepts only {root_system} inputs.')

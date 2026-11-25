@@ -143,6 +143,30 @@ def test_case_aliases_and_multiple_platform_folders_are_not_guessed(tmp_path):
     assert handheld.export(src, 'psx/Game.chd', dest / 'psx')['copied'] == ['Game.chd']
 
 
+def test_human_names_reuse_existing_platform_on_card_and_do_not_add_player_support(tmp_path):
+    src, dest = tmp_path / 'home', tmp_path / 'card'
+    key = 'Collection/Sony - PlayStation Portable/Japan/Racing.cso'
+    put(src, key, b'untouched')
+    put(src, 'Collection/Sega - 32X/Game.7z', b'not an export format')
+    put(src, 'Collection/Atari 7800/Game.chd', b'not an export format')
+    platform = dest / 'ROMs/Sony_PlayStation-Portable'
+    platform.mkdir(parents=True)
+    row, = handheld.entries(src)
+    assert (row['path'], row['system']) == (key, 'psp')
+    with handheld.platform_sources(src, [key], 'rg405m') as (system, files):
+        assert system == 'psp' and [path for path, _ in files] == [Path('Japan/Racing.cso')]
+    result = handheld.export(src, [key], dest)
+    assert result['copied'] == ['ROMs/Sony_PlayStation-Portable/Japan/Racing.cso']
+    put(src, 'psx/One.chd', b'other system')
+    with pytest.raises(ValueError, match='Unrecognized card layout'):
+        handheld.export(src, 'psx/One.chd', dest)
+    assert not (platform.parent / 'psx').exists()
+    (platform.parent / 'PSP').mkdir()
+    with pytest.raises(ValueError, match='Multiple psp folders'):
+        handheld.export(src, key, dest)
+    assert (platform / 'Japan/Racing.cso').read_bytes() == b'untouched'
+
+
 def test_no_space_checked_before_creating_files(tmp_path, monkeypatch):
     src, dest = tmp_path / 'src', tmp_path / 'card'
     put(src, 'psx/A.chd', b'x')

@@ -9,6 +9,7 @@ import time
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from pathlib import Path, PureWindowsPath
 
 from . import archive7z, disc_zip
@@ -25,15 +26,97 @@ SYSTEM_LABELS = {
     'gba': 'Game Boy Advance', 'n64': 'Nintendo 64', 'megadrive': 'Mega Drive / Genesis',
     'mastersystem': 'Master System', 'gamegear': 'Game Gear',
 }
-SYSTEMS = {
-    **{name: name for name in SYSTEM_LABELS}, 'ps1': 'psx', 'megacd': 'segacd', 'gamecube': 'gc',
-    'ngc': 'gc', 'n3ds': '3ds', 'xboxclassic': 'xbox', 'pcecd': 'pcenginecd', 'tgcd': 'pcenginecd',
-    'tg-cd': 'pcenginecd', 'tg16cd': 'pcenginecd', 'turbografxcd': 'pcenginecd', 'turbografx-cd': 'pcenginecd',
-    'neocd': 'neogeocd', 'neogeocdjp': 'neogeocd', 'cd32': 'amigacd32', 'cdtv': 'amigacdtv',
-    'famicom': 'nes', 'fc': 'nes', 'sfc': 'snes', 'superfamicom': 'snes', 'snesna': 'snes',
-    'genesis': 'megadrive', 'sms': 'mastersystem', 'gg': 'gamegear', 'gameboy': 'gb',
-    'gameboycolor': 'gbc', 'gameboyadvance': 'gba',
+# Inventory evidence is not a converter or a claim about a handheld player.
+CATALOG_ONLY_LABELS = {
+    'atari2600': 'Atari 2600', 'atari5200': 'Atari 5200', 'atari7800': 'Atari 7800',
+    'atari800': 'Atari 8-bit computers', 'atarist': 'Atari ST', 'atarilynx': 'Atari Lynx',
+    'atarijaguar': 'Atari Jaguar', 'atarijaguarcd': 'Atari Jaguar CD', 'sega32x': 'Sega 32X',
 }
+CATALOG_LABELS = SYSTEM_LABELS | CATALOG_ONLY_LABELS
+_ATARI_SUFFIX = {
+    '.a26': 'atari2600', '.a52': 'atari5200', '.a78': 'atari7800',
+    '.atr': 'atari800', '.xfd': 'atari800', '.atx': 'atari800', '.xex': 'atari800',
+    '.st': 'atarist', '.stx': 'atarist', '.msa': 'atarist', '.lnx': 'atarilynx',
+    '.j64': 'atarijaguar', '.jag': 'atarijaguar',
+}
+CATALOG_ONLY_FORMATS = {
+    system: frozenset(ext for ext, owner in _ATARI_SUFFIX.items() if owner == system)
+            | {'.zip', '.7z', '.bin', '.rom'} for system in CATALOG_ONLY_LABELS
+}
+CATALOG_ONLY_FORMATS['atari800'] |= {'.car', '.cas'}
+CATALOG_ONLY_FORMATS['atari5200'] |= {'.car'}
+CATALOG_ONLY_FORMATS['atarijaguarcd'] = {'.zip', '.7z', '.cue', '.cdi', '.chd', '.iso'}
+CATALOG_ONLY_FORMATS['sega32x'] |= {'.32x'}
+
+
+def _folder_aliases():
+    # Exact component aliases only. Manufacturer qualification must match the
+    # named system ("Sony - Wii" isn't a Wii library). Never match a title substring.
+    groups = {
+        'sony': {'psx': 'ps1 playstation playstation1 psone', 'ps2': 'playstation2', 'psp': 'playstationportable'},
+        'nintendo': {'gc': 'ngc gamecube', 'wii': '', '3ds': 'n3ds', 'nes': 'fc famicom nintendoentertainmentsystem',
+                    'snes': 'sfc superfamicom snesna supernintendo supernintendoentertainmentsystem',
+                    'gb': 'gameboy', 'gbc': 'gameboycolor', 'gba': 'gameboyadvance', 'n64': 'nintendo64'},
+        'sega': {'segacd': 'megacd megacdsegacd', 'saturn': '', 'dreamcast': '', 'megadrive': 'genesis megadrivegenesis',
+                 'mastersystem': 'sms', 'gamegear': 'gg', 'sega32x': '32x sega32 megadrive32x genesis32x'},
+        'nec': {'pcenginecd': 'pcecd tgcd tg16cd turbografxcd turbografx16cd pcenginecdrom2', 'pcfx': ''},
+        'snk': {'neogeocd': 'neocd neogeocdjp'}, 'panasonic': {'3do': ''},
+        'commodore': {'amigacd32': 'cd32', 'amigacdtv': 'cdtv'},
+        'microsoft': {'xbox': 'xboxclassic originalxbox xboxoriginal'},
+        'atari': {'atari2600': 'atarivcs2600', 'atari5200': '', 'atari7800': '',
+                  'atari800': 'atari8bit atari8bitcomputers atari400 atarixl atarixe atarixegs',
+                  'atarist': 'atariste', 'atarilynx': 'lynx', 'atarijaguar': 'jaguar',
+                  'atarijaguarcd': 'jaguarcd'},
+    }
+    aliases = {'atari': 'atari'}  # Family marker only; never a canonical system ID.
+    for maker, systems in groups.items():
+        for system, spellings in systems.items():
+            for spelling in (system, *spellings.split()):
+                aliases[spelling] = aliases[maker + spelling] = system
+    return aliases
+
+
+_FOLDER_ALIASES = _folder_aliases()
+_SEPARATORS = re.compile(r'[\s._\-\u2010-\u2014]+')
+_QUALIFIER = re.compile(r'(.+?)\s*\(([^()]+)\)\Z')
+
+
+@lru_cache(maxsize=1024)
+def folder_system(name: str) -> str:
+    """Identify a complete folder name, without ever rewriting its source path."""
+    if name.endswith(')') and (match := _QUALIFIER.fullmatch(name)):
+        # A conventional suffix ("Game Boy Advance (GBA)") corroborates the
+        # name; a conflicting tag must not rescue an otherwise ambiguous label.
+        label, tag = match.groups()
+        system = _FOLDER_ALIASES.get(_SEPARATORS.sub('', label.casefold()))
+        return system if system and system == _FOLDER_ALIASES.get(tag.casefold()) else ''
+    if not name or not name[0].isalnum() or not name[-1].isalnum():
+        return ''
+    return _FOLDER_ALIASES.get(_SEPARATORS.sub('', name.casefold()), '')
+
+
+def platform_component(parts, *, unique):
+    """Find a platform boundary; a plain Atari wrapper may contain more specific model folders."""
+    found = None
+    for index, name in enumerate(parts):
+        system = folder_system(name)
+        if found and found[1] == 'atari':
+            system = system or folder_system('Atari ' + name)
+            if system and not system.startswith('atari'):
+                return None
+        elif not unique and found:
+            break  # A title inside a conversion library can itself be called "GC".
+        elif system and found:
+            return None  # Pulling must never flatten a path with multiple platform components.
+        if system:
+            found = index, system
+    return found
+
+
+def file_system(system: str, path: Path) -> str:
+    return _ATARI_SUFFIX.get(path.suffix.lower(), '') if system == 'atari' else system
+
+
 # These additional systems have *CD* cores advertising cue + chd (libretro-core-info:
 # mednafen_pce_fast, mednafen_pcfx, neocd, opera and puae). Not their floppy,
 # HuCard, BIOS, hard disk or arcade counterparts.
@@ -108,30 +191,28 @@ def library_root_allowed(root: Path) -> bool:
     return not root.name.startswith('.') and not any(map(_excluded_directory, root.parts))
 
 
-def _system_directory(root: Path, directory: Path) -> Path | None:
+def platform_directory(root: Path, directory: Path) -> tuple[Path, str] | None:
     if not directory.is_relative_to(root):
         return None
     parts = directory.relative_to(root).parts
     if not visible_directory(root.name) or not all(map(visible_directory, parts)):
         return None
-    folder = root
-    if root.name.casefold() in SYSTEMS:
-        return root
-    for part in parts:
-        folder /= part
-        if part.casefold() in SYSTEMS:
-            return folder
-    return None
+    found = platform_component((root.name, *parts), unique=False)
+    if found is None:
+        return None
+    index, system = found
+    return root.joinpath(*parts[:index]), system
 
 
 def system_folder(root: Path, path: Path) -> Path | None:
     """First matching system at or below root. A nested title is not another library."""
-    return _system_directory(root, path.parent)
+    platform = platform_directory(root, path.parent)
+    return platform[0] if platform else None
 
 
 def library_system(root: Path, path: Path) -> str:
-    folder = system_folder(root, path)
-    return SYSTEMS[folder.name.casefold()] if folder is not None else ''
+    platform = platform_directory(root, path.parent)
+    return file_system(platform[1], path) if platform else ''
 
 
 def _firmware_name(path: Path) -> bool:
@@ -150,6 +231,8 @@ def is_input_name(path: Path, system: str) -> bool:
 def default_mode(system: str, ext: str) -> str:
     if system in _SINGLE_MODES:
         return _SINGLE_MODES[system]
+    if system not in FORMATS:
+        raise ValueError(f'No converter for system: {system}')
     return 'createdvd' if system in ('psp', 'ps2') and ext.lower() == '.iso' else 'createcd'
 
 
@@ -542,7 +625,7 @@ def inspect(source: Path, system: str, *, fresh: bool = True) -> Game:
 
 
 def _inspect(source: Path, system: str, fresh: bool, index: _DirectoryIndex) -> Game:
-    system = SYSTEMS.get(system.lower(), '')
+    system = folder_system(system)
     ext = source.suffix.lower()
     zipped = _local_zip(source, system)
     if not zipped and not is_input_name(source, system):
@@ -606,19 +689,21 @@ def scan(root: Path) -> tuple[list[Game], list[Issue]]:
         children = []
         for d in sorted(d for d in dirs if visible_directory(d)):
             if (base / d).is_symlink():
-                if d.casefold() in SYSTEMS:
+                if folder_system(d):
                     issues.append(Issue(base / d, 'Linked system folder skipped; select its real location to scan.',
                                         'linked_folder'))
             else:
                 children.append(d)
         dirs[:] = children
         # Resolve the library once per directory, rather than per file in large ROM sets.
-        folder = _system_directory(root, base)
-        system = SYSTEMS[folder.name.casefold()] if folder is not None else ''
+        platform = platform_directory(root, base)
+        if not platform or platform[1] not in FORMATS:
+            continue  # Inventory-only systems never become conversion jobs or unpacking warnings.
+        system = platform[1]
         for name in sorted(names):
             path = base / name
             ext = path.suffix.lower()
-            if name.startswith('.') or not system or _firmware_name(path):
+            if name.startswith('.') or _firmware_name(path):
                 continue
             if ext in _ARCHIVES and not _local_zip(path, system):
                 if system in archive7z.FORMATS and ext in ('.7z', '.zip'):

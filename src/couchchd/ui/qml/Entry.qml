@@ -24,9 +24,11 @@ Rectangle {
         anchors.verticalCenter: parent.verticalCenter
         spacing: 20 * cell.unit
         Image {
-            readonly property string action: cell.entry.key
-            visible: action === "tool_export" || action === "catalog_open"
-            source: !visible ? "" : action === "tool_export" ? "../assets/handheld.svg" : "../assets/library-drive.svg"
+            // Only the row factory selects artwork; paths and display labels are never URLs.
+            readonly property string artwork: cell.entry.icon || ""
+            visible: artwork.length > 0
+            source: artwork ? "../assets/" + artwork : ""
+            Accessible.ignored: true
             Layout.preferredWidth: 44 * cell.unit; Layout.preferredHeight: 38 * cell.unit
             fillMode: Image.PreserveAspectFit
         }

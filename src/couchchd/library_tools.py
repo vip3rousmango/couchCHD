@@ -96,16 +96,15 @@ def health(root, scan):
     root = Path(root).resolve(strict=True)
     issues = []
 
-    def system_folder(path):
+    def visible_path(path):
         # Organized discs are intentionally hidden from *input* discovery, but
         # belong to the same frontend system as visible discs and playlists.
         if path.parent.name == '.chd_discs':
-            path = path.parent.parent / path.name
-        return scanner.system_folder(root, path)
+            return path.parent.parent / path.name
+        return path
 
     def add(path, category, reason, action):
-        folder = system_folder(path)
-        issues.append(dict(path=str(path), system=scanner.SYSTEMS[folder.name.casefold()] if folder else '', category=category,
+        issues.append(dict(path=str(path), system=scanner.library_system(root, visible_path(path)), category=category,
                            reason=reason, action=action))
 
     for issue in scan['issues']:
@@ -144,7 +143,7 @@ def health(root, scan):
     for path in sorted(paths):
         disc = multidisc._disc(path.stem)
         if disc:
-            folder = system_folder(path) or path.parent
+            folder = scanner.system_folder(root, visible_path(path)) or path.parent
             title, number, total = disc
             groups[folder, _key(title)].append((path, title, number, total))
     for group in groups.values():

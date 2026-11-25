@@ -80,9 +80,7 @@ class CompressionPlan:
     portable: bool
 
 
-def _steam_deck() -> bool:
-    if os.environ.get('SteamDeck') == '1':
-        return True
+def _deck_board() -> bool:
     # LCD and OLED Decks expose these model names regardless of the distro.
     for name in ('product_name', 'board_name'):
         try:
@@ -91,6 +89,17 @@ def _steam_deck() -> bool:
             continue
         if model in {'jupiter', 'galileo', 'steam deck', 'steam deck oled'}:
             return True
+    return False
+
+
+def host_kind() -> str:
+    """Hardware pictogram hint. A SteamOS install alone doesn't identify a Deck."""
+    return 'deck' if _deck_board() else 'pi' if is_pi() else 'computer'
+
+
+def _steam_deck() -> bool:
+    if os.environ.get('SteamDeck') == '1' or _deck_board():
+        return True
     try:
         return platform.freedesktop_os_release().get('ID') == 'steamos'
     except (OSError, UnicodeError):

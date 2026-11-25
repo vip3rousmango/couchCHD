@@ -10,6 +10,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -28,6 +29,7 @@ import android.widget.*;
 import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.List;
 import java.util.Locale;
 
 public final class ReceiverActivity extends Activity {
@@ -36,15 +38,23 @@ public final class ReceiverActivity extends Activity {
     private static final ExecutorService IO = Executors.newSingleThreadExecutor();
     private Wire peer; private Wire.Manifest offer; private Uri tree;
     private static final int CANVAS = 0xff101d1c, INK = 0xffedf7f4, MUTED = 0xffb1c7c1, MINT = 0xff84dfc4;
-    private static final String FIRST_STEP = "On the same Wi-Fi, open Send over Wi-Fi in CouchCHD on your computer. Then find it here.";
+    private static final String FIRST_STEP = "On your computer, open Connect a handheld in CouchCHD. On the same Wi-Fi, choose Find sender here.";
     private final String model = Rules.deviceLabel(Build.MODEL);
     private SharedPreferences prefs;
-    private LinearLayout panel, actions; private ScrollView scroll;
-    private TextView heading, status, file, amounts;
+    private LinearLayout panel, actions, invitations; private ScrollView scroll;
+    private TextView heading, status, pairingCode, file, amounts;
     private ProgressBar meter;
     private int senderIcon, handheldIcon;
     private String message = FIRST_STEP, failureTitle;
     private Job job; private boolean finished, destroyed;
+    private Presence presence;
+    private WifiManager.MulticastLock multicast;
+    private boolean foreground, dialogOpen;
+    private long presenceGeneration;
+    private String inviteIp;
+    private View heldAction;
+    private final Handler presenceUi = new Handler(Looper.getMainLooper());
+    private final Runnable expireInvite = this::clearInvite;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state); prefs = getSharedPreferences("folders", MODE_PRIVATE);
@@ -54,6 +64,8 @@ public final class ReceiverActivity extends Activity {
         scroll = new ScrollView(this); scroll.setFillViewport(true);
         panel = new LinearLayout(this); panel.setOrientation(LinearLayout.VERTICAL); panel.setPadding(dp(16),dp(10),dp(16),dp(6));
         scroll.addView(panel); root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+        invitations = new LinearLayout(this); invitations.setPadding(dp(16),0,dp(16),0);
+        invitations.setVisibility(View.GONE); root.addView(invitations,new LinearLayout.LayoutParams(-1,-2));
         actions = new LinearLayout(this); actions.setPadding(dp(16),dp(4),dp(16),dp(8));
         root.addView(actions,new LinearLayout.LayoutParams(-1,-2)); setContentView(root);
         // This SDK-only APK is linked by aapt2 without generating a Java R class.
@@ -70,8 +82,9 @@ public final class ReceiverActivity extends Activity {
         GradientDrawable d = new GradientDrawable(); d.setColor(fill); d.setCornerRadius(dp(8));
         if (width > 0) d.setStroke(dp(width),line); return d;
     }
-    private void button(String label, Runnable press) {
-        boolean primary = actions.getChildCount() == 0;
+    private void button(String label, Runnable press) { button(actions,label,press); }
+    private void button(LinearLayout bar, String label, Runnable press) {
+        boolean first = bar.getChildCount() == 0, primary = first && bar == actions;
         Button b = new Button(this); b.setText(label); b.setAllCaps(false); b.setMinHeight(dp(48));
         b.setMinWidth(0); b.setPadding(dp(5),dp(4),dp(5),dp(4));
         StateListDrawable states = new StateListDrawable();
@@ -81,9 +94,50 @@ public final class ReceiverActivity extends Activity {
         b.setBackground(new RippleDrawable(ColorStateList.valueOf(0x55788884),states,null));
         b.setTextColor(new ColorStateList(new int[][]{{android.R.attr.state_focused},{}},new int[]{CANVAS,primary ? CANVAS : INK}));
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0,-2,1);
-        if (!primary) p.leftMargin = dp(8);
-        b.setOnClickListener(v -> press.run()); actions.addView(b,p);
+        if (!first) p.leftMargin = dp(8);
+        b.setOnClickListener(v -> press.run()); bar.addView(b,p);
         if (primary && !b.isInTouchMode()) b.requestFocus();
+    }
+    private void clearInvite() {
+        presenceUi.removeCallbacks(expireInvite);
+        if (inviteIp == null) return;
+        inviteIp = null; invitations.setVisibility(View.GONE); invitations.removeAllViews();
+    }
+    private boolean idleForPresence() {
+        return foreground && !destroyed && !dialogOpen && job == null && peer == null && offer == null && !finished;
+    }
+    private void invitation(long generation, String ip) {
+        if (generation != presenceGeneration || presence == null || !idleForPresence() || inviteIp != null) return;
+        inviteIp = ip;
+        // Separate row: never rebuild, move, or focus an action already under a finger or controller.
+        button(invitations,"Connect to " + ip,() -> {
+            if (ip.equals(inviteIp) && idleForPresence()) find(ip);
+        });
+        button(invitations,"Dismiss",this::clearInvite);
+        invitations.setVisibility(View.VISIBLE);
+        presenceUi.postDelayed(expireInvite,20000);
+    }
+    private void updatePresence() {
+        if (idleForPresence()) {
+            if (presence != null) return;
+            final long generation = ++presenceGeneration;
+            presence = Presence.start(model,ip -> presenceUi.post(() -> invitation(generation,ip)));
+            if (presence == null) return;
+            try {
+                WifiManager wifi = getApplicationContext().getSystemService(WifiManager.class);
+                if (wifi != null) {
+                    multicast = wifi.createMulticastLock("CouchCHD foreground discovery");
+                    multicast.setReferenceCounted(false); multicast.acquire();
+                }
+            } catch (SecurityException denied) { multicast = null; }  // Manual Find still works.
+        } else {
+            if (presence != null) { ++presenceGeneration; presence.close(); presence = null; }
+            clearInvite();
+            if (multicast != null) {
+                try { if (multicast.isHeld()) multicast.release(); } catch (SecurityException ignored) { }
+                multicast = null;
+            }
+        }
     }
     private void device(LinearLayout strip, int icon, String role, String name, String address) {
         LinearLayout unit = new LinearLayout(this); unit.setGravity(Gravity.CENTER_VERTICAL);
@@ -102,18 +156,23 @@ public final class ReceiverActivity extends Activity {
         LinearLayout strip = new LinearLayout(this); strip.setGravity(Gravity.CENTER_VERTICAL);
         strip.setPadding(0,dp(6),0,dp(6)); panel.addView(strip);
         String host = peer == null ? "" : peer.hostLabel;
-        device(strip,senderIcon,"Sender",peer == null ? "Not paired" : host.isEmpty() ? peer.peer.host : host,
+        boolean deck = peer != null && "deck".equals(peer.hostKind);
+        String role = deck ? "Steam Deck sender" : peer != null && "pi".equals(peer.hostKind) ? "Raspberry Pi sender" : "Sender";
+        device(strip,deck ? handheldIcon : senderIcon,role,peer == null ? "Not paired" : host.isEmpty() ? peer.peer.host : host,
                peer == null || host.isEmpty() ? "" : peer.peer.host);
         device(strip,handheldIcon,"This handheld",model.isEmpty() ? "Android handheld" : model,"");
     }
     private void draw() {
         if (destroyed) return;
+        updatePresence();
         panel.removeAllViews(); actions.removeAllViews(); scroll.scrollTo(0,0);
         String title = job != null ? job.title : failureTitle != null ? failureTitle : finished ? "Transfer complete" :
             offer != null ? (tree == null ? "Choose a destination" : "Ready to receive") :
             peer != null ? "Compare the pairing code" : "Receive over Wi-Fi";
         heading = text(panel,title,24,INK); heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        if (peer != null && offer == null) text(panel,peer.code,26,MINT).setTypeface(Typeface.MONOSPACE,Typeface.BOLD);
+        if (peer != null && offer == null) {
+            pairingCode = text(panel,peer.code,26,MINT); pairingCode.setTypeface(Typeface.MONOSPACE,Typeface.BOLD);
+        }
         if (job != null && offer != null) {
             file = text(panel,"",17,INK); file.setMaxLines(2); file.setEllipsize(TextUtils.TruncateAt.END);
             meter = new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal); meter.setMax(1000);
@@ -128,7 +187,7 @@ public final class ReceiverActivity extends Activity {
             if (tree != null) text(panel,"Folder: " + DocumentsContract.getTreeDocumentId(tree),15,MUTED);
         }
         status = text(panel,message,16,MUTED);
-        if (job != null) { button("Stop", this::stop); return; }
+        if (job != null) { button(peer != null && offer == null ? "Disconnect" : "Stop", this::stop); return; }
         if (finished) { button("New transfer", this::reset); return; }
         if (peer == null) {
             button("Find sender", () -> find("")); button("Enter host IP", this::manual);
@@ -145,10 +204,21 @@ public final class ReceiverActivity extends Activity {
     private void manual() {
         EditText ip = new EditText(this); ip.setHint("192.168.1.20"); ip.setSingleLine(true);
         ip.setInputType(InputType.TYPE_CLASS_PHONE); ip.setText(prefs.getString("host", "")); ip.selectAll();
-        new AlertDialog.Builder(this).setTitle("Sender IPv4 address").setView(ip).setNegativeButton("Cancel",null)
+        showDialog(new AlertDialog.Builder(this).setTitle("Sender IPv4 address").setView(ip).setNegativeButton("Cancel",null)
             .setPositiveButton("Find sender",(d,w)-> {
-                String address = ip.getText().toString().trim(); if (!address.isEmpty()) find(address);
-            }).show();
+                String address = ip.getText().toString().trim(); if (!address.isEmpty()) find(address,true);
+            }).create());
+    }
+    private void showDialog(AlertDialog dialog) {
+        dialogOpen = true; updatePresence();
+        dialog.setOnDismissListener(d -> { dialogOpen = false; updatePresence(); });
+        // Some handhelds use gamepad A/B rather than Android's confirm/back keys.
+        dialog.setOnKeyListener((d,key,event) -> {
+            if (key != KeyEvent.KEYCODE_BUTTON_A && key != KeyEvent.KEYCODE_BUTTON_B) return false;
+            return dialog.dispatchKeyEvent(new KeyEvent(event.getAction(),
+                key == KeyEvent.KEYCODE_BUTTON_A ? KeyEvent.KEYCODE_DPAD_CENTER : KeyEvent.KEYCODE_BACK));
+        });
+        dialog.show();
     }
     private interface Work { Runnable run(Job j) throws Exception; }
     private static String amount(long bytes) {
@@ -161,11 +231,21 @@ public final class ReceiverActivity extends Activity {
         final String title;
         final Handler ui = new Handler(Looper.getMainLooper());
         boolean canceled, queued; Thread thread;
+        Wire candidate;
         Wire.Phase phase; Wire.Entry entry; long bytes; double speed;
         Job(String title) { this.title = title; }
         synchronized void start() { thread = Thread.currentThread(); if (canceled) thread.interrupt(); }
         synchronized void cancel() { canceled = true; if (thread != null) thread.interrupt(); }
         synchronized void ended() { thread = null; Thread.interrupted(); }
+        void waiting(boolean preparing) {
+            ui.post(() -> {
+                if (destroyed || job != this || canceled) return;
+                pairingCode.setVisibility(View.GONE);
+                heading.setText(preparing ? "Connected · preparing games" : "Connected · waiting for games");
+                status.setText(preparing ? "The computer is checking your selection. Nothing has been copied." :
+                    "Choose games for one platform on the computer. Keep Receive open; nothing is copied until you confirm.");
+            });
+        }
         // A folder of tiny already-owned files must not queue one UI event for every hash.
         public synchronized void show(Wire.Phase p, Wire.Entry e, long n, double rate) {
             if (canceled) return;
@@ -212,34 +292,47 @@ public final class ReceiverActivity extends Activity {
                 };
             } finally { j.ended(); }
             Runnable finalResult = result;
-            runOnUiThread(() -> { if (destroyed || job != j) return;
+            runOnUiThread(() -> {
+                if (destroyed || job != j) {
+                    if (j.candidate != null) IO.execute(j.candidate::disconnect);
+                    return;
+                }
                 job = null; j.ui.removeCallbacksAndMessages(null);
                 getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); finalResult.run(); draw(); });
         });
     }
-    private void find(String address) {
-        run("Looking for sender","Searching this Wi-Fi network. No files are being copied.", j -> {
-            Wire connected = new Wire(Wire.find(address)); connected.pair(model); Wire.check();
-            return () -> { peer = connected; if (!address.isEmpty()) prefs.edit().putString("host",address).apply();
-                message="Only approve on the computer if both codes match. Then confirm here."; };
+    private void find(String address) { find(address,false); }
+    private void find(String address, boolean remember) {
+        run("Looking for sender","Looking for CouchCHD senders. No files are being copied.", j -> {
+            List<Wire.Peer> found = Wire.find(address); Wire.check();
+            if (found.size() == 1) return pair(j, found.get(0), remember ? address : "");
+            return () -> {
+                message = "Choose the computer you want to connect to, then compare its code.";
+                String[] hosts = new String[found.size()];
+                for (int i = 0; i < hosts.length; i++) hosts[i] = found.get(i).host;
+                showDialog(new AlertDialog.Builder(this).setTitle("Choose a CouchCHD sender")
+                    .setItems(hosts,(dialog,index) -> run("Requesting pairing","Connecting to " + hosts[index],
+                        next -> pair(next, found.get(index), "")))
+                    .setNegativeButton("Cancel",null).create());
+            };
         });
+    }
+    private Runnable pair(Job j, Wire.Peer candidate, String address) throws Exception {
+        Wire connected = j.candidate = new Wire(candidate); connected.pair(model); Wire.check();
+        return () -> { peer = connected; if (!address.isEmpty()) prefs.edit().putString("host",address).apply();
+            message="Only approve if both codes match. Confirm on the computer and here."; };
     }
     private void approved() {
         Wire session = peer;
         run("Waiting for approval","Approve this code on the sender. No files are being copied.", j -> {
-            long until = System.nanoTime() + 120000000000L;
-            while (System.nanoTime() < until) {
-                Wire.Manifest manifest = session.manifest();
-                Wire.check();
-                if (manifest != null) return () -> {
-                    offer = manifest; String saved = prefs.getString("folder:" + offer.system,null);
-                    tree = saved == null ? null : Uri.parse(saved);
-                    message = tree == null ? "Sender approved. Choose the existing " + label() + " folder used by Daijishō or your frontend, not the card root." :
-                        "Sender approved. Check your saved folder, then receive. Existing files are never replaced.";
-                };
-                Thread.sleep(1000);
-            }
-            throw new IOException("No host approval yet. Check the computer, then confirm again.");
+            Wire.Manifest manifest = session.awaitManifest(j::waiting);
+            Wire.check();
+            return () -> {
+                offer = manifest; String saved = prefs.getString("folder:" + offer.system,null);
+                tree = saved == null ? null : Uri.parse(saved);
+                message = tree == null ? "Selection received. Choose the existing " + label() + " folder used by Daijishō or your frontend, not the card root." :
+                    "Selection received. Check your saved folder, then receive. Existing files are never replaced.";
+            };
         });
     }
     private void pick() {
@@ -284,17 +377,32 @@ public final class ReceiverActivity extends Activity {
         });
     }
     private void stop() {
+        if (job != null && offer == null) {
+            job.cancel(); job.ui.removeCallbacksAndMessages(null); job = null;
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            reset(); return;
+        }
         if (job != null) { job.cancel(); heading.setText("Stopping safely"); status.setText("Waiting for the current operation to stop.");
             if (offer != null) amounts.setText(""); }
     }
     private void reset() {
-        failureTitle = finished ? null : "Disconnected";
+        if (peer != null && !finished) IO.execute(peer::disconnect);
+        failureTitle = finished ? null : peer == null ? "Stopped" : "Disconnected";
         peer = null; offer = null; tree = null; finished = false;
-        message="Start a new Send over Wi-Fi session on your computer, then find it here."; draw();
+        message=FIRST_STEP; draw();
     }
-    @Override protected void onStop() { super.onStop(); if (!isChangingConfigurations()) stop(); }
+    @Override protected void onStart() { super.onStart(); foreground = true; updatePresence(); }
+    @Override protected void onResume() { super.onResume(); foreground = true; updatePresence(); }
+    @Override protected void onPause() { foreground = false; heldAction = null; updatePresence(); super.onPause(); }
+    @Override protected void onStop() {
+        foreground = false; updatePresence();
+        if (!isChangingConfigurations()) stop();
+        super.onStop();
+    }
     @Override protected void onDestroy() {
-        destroyed = true; stop(); if (job != null) job.ui.removeCallbacksAndMessages(null); super.onDestroy();
+        destroyed = true; updatePresence(); stop(); if (job != null) job.ui.removeCallbacksAndMessages(null);
+        if (peer != null && !finished) IO.execute(peer::disconnect);
+        super.onDestroy();
     }
     @Override public void onBackPressed() {
         if (job != null) stop();
@@ -303,23 +411,32 @@ public final class ReceiverActivity extends Activity {
     }
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
         int key = event.getKeyCode();
+        if (key == KeyEvent.KEYCODE_BUTTON_A) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                heldAction = getCurrentFocus() instanceof Button ? getCurrentFocus() : null;
+            } else if (event.getAction() == KeyEvent.ACTION_UP) {
+                View target = heldAction; heldAction = null;
+                if (!event.isCanceled() && target != null && target == getCurrentFocus() && target.isAttachedToWindow())
+                    target.performClick();
+            }
+            return true;
+        }
         if (actions != null && actions.getChildCount() > 0 &&
                 (key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT)) {
             // Android can focus the full-height ScrollView instead of a button when
             // a D-pad wakes a touch-mode screen. Horizontal keys belong to the action bar;
             // leave vertical keys to Android for scrolling the status text.
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                int current = actions.indexOfChild(getCurrentFocus());
+                LinearLayout bar = invitations.indexOfChild(getCurrentFocus()) >= 0 ? invitations : actions;
+                int current = bar.indexOfChild(getCurrentFocus());
                 int next = current < 0 ? 0 : current + (key == KeyEvent.KEYCODE_DPAD_LEFT ? -1 : 1);
-                actions.getChildAt(Math.max(0, Math.min(actions.getChildCount()-1, next))).requestFocusFromTouch();
+                bar.getChildAt(Math.max(0, Math.min(bar.getChildCount()-1, next))).requestFocusFromTouch();
             }
             return true;
         }
         return super.dispatchKeyEvent(event);
     }
     @Override public boolean onKeyUp(int key, KeyEvent e) {
-        // Android gamepads may send BUTTON_A rather than DPAD_CENTER / ENTER.
-        if (key == KeyEvent.KEYCODE_BUTTON_A && getCurrentFocus() instanceof Button) return getCurrentFocus().performClick();
         if (key == KeyEvent.KEYCODE_BUTTON_B) { onBackPressed(); return true; }
         return super.onKeyUp(key,e);
     }

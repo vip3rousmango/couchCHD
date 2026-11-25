@@ -16,7 +16,8 @@ from .handheld_profiles import DEFAULT_PROFILE, resolve_profile
 from .ledger import SafetyError, install_new
 from .menu_entry import host_home_path
 from .output_formats import is_output
-from .scanner import SYSTEMS, _firmware_name, library_root_allowed, safe_relative_name, system_folder, visible_directory
+from .scanner import (_firmware_name, folder_system, library_root_allowed, platform_directory,
+                      safe_relative_name, visible_directory)
 
 _DIR = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0)
 _MAX_PLAYLIST = 1024 * 1024
@@ -146,11 +147,12 @@ def _catalog(root, rootfd, formats, selected=()):
         for base, dirs, names, fd in os.fwalk('.', dir_fd=rootfd):
             dirs[:] = [d for d in dirs if visible_directory(d)]
             base = Path(base)
-            folder = system_folder(root, root / base / '_')
-            system = SYSTEMS.get(folder.name.casefold()) if folder is not None else None
+            platform = platform_directory(root, root / base)
+            if platform is None:
+                continue
+            folder, system = platform
             if system not in formats:
-                if system:
-                    dirs.clear()
+                dirs.clear()
                 continue
             for name in names:
                 path = base / name
@@ -188,13 +190,9 @@ def _fold(name):
     return unicodedata.normalize('NFC', name).casefold()
 
 
-def _system(name):
-    return SYSTEMS.get(name.casefold())
-
-
 def _legacy_layout(dest, destfd, systems):
     """Backward-compatible RG405M pack; do not invent system names in a different layout."""
-    direct = _system(dest.name)
+    direct = folder_system(dest.name)
     if direct:
         if systems != {direct}:
             raise SafetyError(f'Select the parent ROM directory to export other systems, not {dest.name}.')
@@ -205,20 +203,23 @@ def _legacy_layout(dest, destfd, systems):
     names = os.listdir(destfd)
     roms = [n for n in names if _fold(n) == 'roms']
     if roms and _fold(dest.name) != 'roms':
-        if len(roms) != 1 or any(_system(n) for n in names):
+        if len(roms) != 1 or any(folder_system(n) for n in names):
             raise SafetyError('Ambiguous card layout; choose the intended ROMs or platform folder.')
         base = Path(roms[0])
         with open_directory(base, destfd) as romfd:
             names = os.listdir(romfd)
     result = {}
     # Keep the original empty-card workflow. On an initialized but unfamiliar card,
-    # guessing a missing folder (e.g. creating psx beside Sony - PlayStation) is unsafe.
+    # guessing a missing folder (e.g. creating psx beside a custom PS library) is unsafe.
     with open_directory(base, destfd) as romfd:
-        folder_systems = {_system(n) for n in names if visible_directory(n) and
-                          stat.S_ISDIR(os.stat(n, dir_fd=romfd, follow_symlinks=False).st_mode)}
-    unfamiliar = None in folder_systems or (folder_systems and folder_systems.isdisjoint({'psx', 'dreamcast', 'psp'}))
+        folders = {n.casefold(): folder_system(n) for n in names if visible_directory(n) and
+                   stat.S_ISDIR(os.stat(n, dir_fd=romfd, follow_symlinks=False).st_mode)}
+    # An identified custom folder can receive its own games, but isn't evidence
+    # that creating a *different* canonical directory will fit the card's layout.
+    unfamiliar = (any(name != system and name != 'ps1' for name, system in folders.items()) or
+                  (folders and {'psx', 'dreamcast', 'psp'}.isdisjoint(folders.values())))
     for system in systems:
-        matches = [n for n in names if _system(n) == system]
+        matches = [n for n in names if folder_system(n) == system]
         if len(matches) > 1:
             raise SafetyError(f'Multiple {system} folders; choose the intended platform folder.')
         if not matches and unfamiliar:
@@ -236,10 +237,10 @@ def _layout(dest, destfd, systems, profile):
         if len(systems) != 1:
             raise SafetyError('This profile copies one system at a time. Choose its assigned game folder.')
         system, = systems
-        direct = _system(dest.name) or {'ps': 'psx', 'ds': 'nds', 'nds': 'nds'}.get(_fold(dest.name))
+        direct = folder_system(dest.name) or {'ps': 'psx', 'ds': 'nds', 'nds': 'nds'}.get(_fold(dest.name))
         rom_parents = {'roms', 'easyroms', 'share', 'userdata', 'android'}
         if ((direct and direct != system) or _fold(dest.name) in rom_parents or
-                (not direct and any(_fold(n) in rom_parents or _system(n) for n in os.listdir(destfd)))):
+                (not direct and any(_fold(n) in rom_parents or folder_system(n) for n in os.listdir(destfd)))):
             raise SafetyError(f'Choose the existing game folder for {system}, not {dest.name}.')
         return {system: Path('.')}
 
@@ -472,8 +473,8 @@ def platform_sources(root, selected, profile, *, players=None):
     keys = _selection_keys(selected)
     systems = set()
     for key in keys:
-        folder = system_folder(root, root / key)
-        system = _system(folder.name) if folder is not None else None
+        platform = platform_directory(root, (root / key).parent)
+        system = platform[1] if platform else None
         if system not in formats:
             raise SafetyError(f'Not a complete playable export entry: {key}')
         systems.add(system)

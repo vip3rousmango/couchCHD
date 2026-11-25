@@ -50,13 +50,14 @@ def test_inventory_and_selected_complete_set(tmp_path):
     assert [p.stat().st_mtime_ns for p in outputs] == timestamps
 
 
-def test_direct_platform_source_and_destination(tmp_path):
-    source = tmp_path / 'home/PS1'
+@pytest.mark.parametrize('src_name,dst_name', [('PS1', 'psx'), ('Sony - PlayStation', 'Sony_PlayStation_1')])
+def test_direct_platform_source_and_destination(tmp_path, src_name, dst_name):
+    source = tmp_path / 'home' / src_name
     put(source, 'nested/Game.chd', b'game')
-    dest = tmp_path / 'psx'
+    dest = tmp_path / dst_name
     dest.mkdir()
     game, = transport.list_games(source)
-    assert game.relative == 'PS1/nested/Game.chd'
+    assert game.relative == src_name + '/nested/Game.chd'
     assert transport.destination_paths(dest, game.members) == (dest / 'nested/Game.chd',)
     assert transport.pull_game(source, game.relative, dest) == (dest / 'nested/Game.chd',)
     other = tmp_path / 'psp'
@@ -168,6 +169,9 @@ def test_recursive_metadata_scan_never_opens_payloads(tmp_path, monkeypatch, rem
     put(source, 'Unknown/Disc.chd', b'unknown platform')
     put(source, 'Master/Redump/psp/Skip.rar', b'unsupported input')
     put(source, 'BIOS/psp/Skip.iso', b'firmware')
+    put(source, 'Master/Atari/Archive.zip', b'unknown model')
+    put(source, 'Master/Atari/Game.a78', b'not content verified')
+    put(source, 'Master/Sega 32/Game.7z', b'not inspected')
     put(source, '.private/psp/Skip.iso', b'hidden')
     (source / 'alias').symlink_to(source / 'Master', target_is_directory=True)
     if remote:
@@ -179,10 +183,12 @@ def test_recursive_metadata_scan_never_opens_payloads(tmp_path, monkeypatch, rem
         pytest.fail('Directory scan opened a game payload')
     monkeypatch.setattr(transport._Remote if remote else transport._Mounted, 'stream', unexpected_read)
     snapshot = transport.discover('server:' + source.as_posix() if remote else source)
-    assert (snapshot.directories, snapshot.platform_folders, snapshot.unplaced, snapshot.unsupported) == (5, 1, 1, 1)
+    assert (snapshot.directories, snapshot.platform_folders, snapshot.unplaced, snapshot.unsupported) == (7, 3, 2, 1)
+    assert set(snapshot.unplaced_examples.splitlines()) == {'Unknown/Disc.chd', 'Master/Atari/Archive.zip'}
     assert [(g.relative, g.kind) for g in snapshot.games] == [
+        ('Master/Atari/Game.a78', 'catalog_only'),
         ('Master/Redump/psp/Demo.iso', 'original'), ('Master/Redump/psp/Demo.zip', 'original'),
-        ('Master/Redump/psp/Game.cso', 'output')]
+        ('Master/Redump/psp/Game.cso', 'output'), ('Master/Sega 32/Game.7z', 'catalog_only')]
 
 
 def test_wrapped_playlist_preserves_references_and_requires_unambiguous_destination(tmp_path):

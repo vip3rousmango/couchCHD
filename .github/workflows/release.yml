@@ -273,7 +273,7 @@ jobs:
 
           Format support includes CHD, PSP CSO, Dolphin RVZ, original Xbox XISO, CARD1 3DS trimming, and single-ROM 7z for supported cartridge cores. XISO and trimmed 3DS always retain the original. Test emulator playback and existing saves before clearing any recoverable originals.
 
-          New in preview.19: saving a home library scans nested platform folders and distinguishes ready games from originals. Refresh an older saved library once. Use Dashboard → Sync to handheld to send from a saved mounted library with the default RG405M profile. The host and Android companion show the device, pairing state, file progress and network speed. Wait for Transfer complete, then Sync in Daijishō.
+          New in preview.20: open Receive and choose Connect a handheld on the computer to see and invite nearby companions before selecting games. Compare codes on both screens and wait for Connected. A firmware profile configures formats; it never pairs hardware. Systems and library views have offline console pictograms. Refresh saved libraries to recognize long platform names, Atari families and Sega 32X; inventory-only systems are not offered for conversion.
 
           New library workflows: preview a space goal, check library health without editing ROMs, mark verified outputs after playing and reclaim only reviewed backups. Export complete RG405M playlists or pull an existing compressed game from a named mounted/rclone library without recompression or overwriting conflicting games. Mixed loose-disc and supported ZIP libraries process one archive at a time; PSP ZIP-to-CSO streams without writing an intermediate ISO. Original ZIPs are always retained.
 

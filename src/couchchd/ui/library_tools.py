@@ -1,6 +1,8 @@
 """Controller screens for planning, checking, reviewing and copying a library."""
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from pathlib import Path
 from queue import SimpleQueue
 from threading import Event, Thread
@@ -16,6 +18,50 @@ from .presentation import row, size
 
 
 GIB = 1024**3
+
+
+class _NearbyHandhelds:
+    """Optional discovery hints. A failed broadcast must not interrupt the TLS pairing listener."""
+
+    def __init__(self, address):
+        self.browser = None
+        self.devices = ()
+        self.note = ''
+        try:
+            from ..receiver_discovery import NearbyReceivers
+            self.browser = NearbyReceivers(address)
+        except (ImportError, OSError, ValueError):
+            self._unavailable()
+
+    def poll(self):
+        if self.browser is not None:
+            try:
+                self.devices = self.browser.poll()
+            except (OSError, ValueError):
+                self._unavailable()
+
+    def invite(self, entry):
+        if self.browser is None:
+            return
+        ip, model = entry
+        try:
+            if entry in self.devices and self.browser.invite(ip):
+                self.note = f'Invitation sent to {model or "CouchCHD Receive"} ({ip}). Confirm the invitation in Receive.'
+            else:
+                self.note = 'That receiver is no longer advertising. Open Receive or use Find sender there.'
+        except (OSError, ValueError):
+            self._unavailable()
+
+    def _unavailable(self):
+        self.close()
+        self.note = 'Nearby discovery unavailable. Use Find sender or Enter host IP in Receive instead.'
+
+    def close(self):
+        if self.browser is not None:
+            with suppress(OSError):
+                self.browser.close()
+            self.browser = None
+        self.devices = ()
 
 
 class LibraryTools:
@@ -37,6 +83,9 @@ class LibraryTools:
         self._load_profile_settings()
         self.repeat_note = ''
         self._wifi_stop = None
+        # Serialize listener startup/cleanup, without occupying the library-browsing worker.
+        self._wifi_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='wifi-session')
+        self._pair_first = False
         self.transfer = {}
         self._wifi_timer = QTimer(bridge)
         self._wifi_timer.setInterval(200)
@@ -77,17 +126,31 @@ class LibraryTools:
     def _platform_folder(self):
         return self.profile['destination'] == 'platform'
 
-    @property
-    def _android(self):
-        key = self.profile['id']
+    @staticmethod
+    def _android_profile(key):
         return key.startswith('android-') or key in (handheld_profiles.DEFAULT_PROFILE, 'gamma-core')
+
+    @property
+    def _one_system(self):
+        return self._pair_first or self._platform_folder
 
     def _profiles_menu(self):
         body = ('Saved profile unavailable. Choose your handheld and its current firmware.' if self.profile_missing
                 else 'Choose the system actually running on your handheld.')
-        self.ui._show('pack_profiles', 'Handheld and firmware', body, [
-            row('tool_profile_set', p['label'], ', '.join(p['models']) or p['firmware'],
-                'Current' if p is self.profile and not self.profile_missing else '', p['id']) for p in self.profiles.values()])
+        options = self.profiles.values()
+        matches = set()
+        if self._pair_first:
+            body += ' This selects compatible game formats for the connected Android receiver; it does not pair a device.'
+            model = self.transfer.get('device', '').casefold() if self.transfer.get('phase') == 'connected' else ''
+            if model:
+                matches = {p['id'] for p in options if any(m.casefold() == model for m in p['models'])}
+            if matches:
+                options = sorted(options, key=lambda p: p['id'] not in matches)
+                body += ' Model suggestions match the reported name only. Confirm the firmware and installed players.'
+        self.ui._show('pack_profiles', 'Handheld export profiles', body, [
+            row('tool_profile_set', p['label'], ('Model suggestion · ' if p['id'] in matches else '') +
+                (', '.join(p['models']) or p['firmware']),
+                'Current' if p is self.profile and not self.profile_missing else '', p['id']) for p in options])
 
     @staticmethod
     def _formats(systems):
@@ -143,6 +206,13 @@ class LibraryTools:
                            + (' Stop EmulationStation first to protect playlist metadata.' if ui.recalbox else ''),
                            'Start verified batch', lambda: ui._run(False, sources, plan=(systems, self.goal)),
                            return_to=lambda: self._show_plan(self.plan))
+        if key == 'tool_devices':
+            return self._start_wifi(pair_first=True)
+        if key == 'tool_wifi_choose':
+            return self._source_menu('export')
+        if key == 'tool_wifi_retry':
+            self.stop_wifi()
+            return self._start_wifi(pair_first=True)
         if key in ('tool_health', 'tool_export'):
             return self._source_menu(key.removeprefix('tool_'))
         if key in ('tool_health_here', 'tool_export_here'):
@@ -182,7 +252,7 @@ class LibraryTools:
         if key == 'tool_filter':
             return self._pack_filters()
         if key == 'tool_filter_by':
-            if self._platform_folder and self.filter != arg:
+            if self._one_system and self.filter != arg:
                 self.selected.clear()
                 self.repeat_note = ''
             self.filter = arg
@@ -200,9 +270,14 @@ class LibraryTools:
         if key == 'tool_pack_dest':
             return ui._pick('export_dest')
         if key == 'tool_wifi':
-            return self._start_wifi()
+            return self._offer_wifi() if self._pair_first else self._start_wifi(pair_first=False)
+        if key == 'tool_nearby_receiver':
+            entry = next((r for r in self._wifi_latest[-1].get('nearby', ()) if r[0] == arg), None)
+            if entry:
+                self._wifi_commands.put(('invite', entry))
+            return
         if key == 'tool_wifi_approve':
-            self._wifi_commands.put(arg)
+            self._wifi_commands.put(('approve', arg))
             return
         if key == 'tool_wifi_firewall':
             self._wifi_allow.set()
@@ -232,11 +307,19 @@ class LibraryTools:
     def back(self, kind):
         if kind in ('plan_systems', 'space_goal', 'plan_preview'):
             self._plan_setup()
+        elif kind == 'pack_wifi':
+            if self._pair_first:
+                self.ui._hide()
+            else:
+                self.stop_wifi()
+                self.show_pack()
+        elif self._pair_first and (kind == 'export_source' or (kind == 'pack_profiles' and self.profile_missing)):
+            self._return_wifi()
         elif kind == 'pack_profiles' and self.profile_missing:
             self.ui._hide()
-        elif kind in ('pack_profiles', 'pack_players', 'pack_info', 'pack_system', 'pack_saved'):
+        elif kind in ('pack_profiles', 'pack_players', 'pack_info', 'pack_system', 'pack_saved', 'pack_source_error'):
             self._source_menu('export')
-        elif kind in ('pack_filter', 'pack_changed', 'pack_wifi'):
+        elif kind in ('pack_filter', 'pack_changed'):
             self.show_pack()
         elif kind == 'pack_games':
             self._source_menu('export')
@@ -296,6 +379,8 @@ class LibraryTools:
 
     def _source_menu(self, action):
         if action == 'export':
+            if self._pair_first and self.transfer.get('phase') != 'connected':
+                return self._return_wifi()
             if self.profile_missing:
                 return self._profiles_menu()
             version = next((p['label'] for p in self.profile['players'] if p.get('group') and p['id'] in self.players),
@@ -309,13 +394,21 @@ class LibraryTools:
                 rows.append(row('tool_saved', 'Choose from home libraries', 'Use a saved disk or mounted network folder.'))
                 rows.append(row('tool_export_browse', 'Browse a source folder', 'Mounted library or system folder.'))
             rows.append(row('tool_players', 'Players and formats', version, len(self.players)))
-            rows.append(row('tool_profiles', 'Handheld and firmware', self.profile['label']))
+            rows.append(row('tool_profiles', 'Handheld export profile', self.profile['label']))
             rows.append(row('tool_profile_info', 'About this profile', 'Folder layout, evidence and playback checks.'))
-            body = (('Choose a game source below. On the next screen, select a game and choose Send over Wi-Fi.'
-                     if self._android else
-                     'Choose a game source, then select games to copy to your connected card.')
-                    if self.players else 'No player selected. Choose the emulator installed on your handheld to see eligible games.')
-            return self.ui._show('export_source', 'Sync to handheld', body, rows)
+            if not self.players:
+                body = 'No player selected. Choose the emulator installed on your handheld to see eligible games.'
+            elif self._pair_first:
+                body = 'Choose a game source, then offer games from one system. Nothing is shared until you offer it.'
+            elif self._android_profile(self.profile['id']):
+                body = 'Choose a game source, then select games to copy to a card or send to an Android receiver.'
+            else:
+                body = 'Choose a game source, then select games to copy to your connected card.'
+            if self._pair_first:
+                body = f'Paired with {self._peer_label()}. No games offered yet.\n{body}'
+                rows.append(row('back', 'Return to connected handheld'))
+            return self.ui._show('export_source', 'Choose games to offer' if self._pair_first else 'Prepare a game pack',
+                                 body, rows)
         rows = []
         if self.ui.backend is not None:
             rows.append(row(f'tool_{action}_here', 'Use current library', self.ui.location))
@@ -341,7 +434,7 @@ class LibraryTools:
             missing = len(previous) - len(self.selected)
             self.repeat_note = f'{missing} previously selected no longer eligible or present.' if missing else ''
             self.filter = ''
-            if self._platform_folder and data:
+            if self._one_system and data:
                 if len(self.catalog_systems) == 1:
                     self.filter = self.catalog_systems[0]
                 elif repeat and self.last_pack.get('system') in self.catalog_systems:
@@ -354,11 +447,11 @@ class LibraryTools:
         self.ui._work('Checking library health' if action == 'health' else 'Finding matching game files', load, loaded)
 
     def _pack_filters(self, first=False):
-        systems = self.catalog_systems if self._platform_folder else ['', *self.catalog_systems]
+        systems = self.catalog_systems if self._one_system else ['', *self.catalog_systems]
         self.ui._show('pack_system' if first else 'pack_filter',
-                      'Choose one system' if self._platform_folder else 'Show games',
+                      'Choose one system' if self._one_system else 'Show games',
                       'Each system uses its own game folder. Changing system starts a new selection.'
-                      if self._platform_folder else 'Changing this view keeps your selection.', [
+                      if self._one_system else 'Changing this view keeps your selection.', [
                           row('tool_filter_by', scanner.SYSTEM_LABELS.get(s, 'All systems'), '',
                               'Current' if self.filter == s else '', s) for s in systems])
 
@@ -393,15 +486,20 @@ class LibraryTools:
             body += '\n' + self.repeat_note
         if self.catalog:
             chosen_systems = {g['system'] for g in self.catalog if g['path'] in self.selected}
-            if self._android:
+            if self._pair_first:
+                rows.append(row('tool_wifi' if len(chosen_systems) == 1 else 'note', 'Offer selected games',
+                                f'Share only this selection with {self._peer_label()}. Review the copy on the handheld.'
+                                if chosen_systems else 'Paired, but no games selected. Choose games below.'))
+            elif self._android_profile(self.profile['id']):
                 wifi_ready = len(chosen_systems) == 1
                 rows.append(row('tool_wifi' if wifi_ready else 'note', 'Send over Wi-Fi',
                                 'Open CouchCHD Receive on your handheld.' if wifi_ready else
                                 'Select games from just one platform.' if chosen_systems else 'Select a game below to start pairing.'))
-            rows.append(row('tool_pack_dest' if self.selected else 'note', 'Copy to a mounted folder',
-                            self.folder_hint if self.selected else 'Select games first. Use this for a card reader or local export.'))
+            if not self._pair_first:
+                rows.append(row('tool_pack_dest' if self.selected else 'note', 'Copy to a mounted folder',
+                                self.folder_hint if self.selected else 'Select games first. Use this for a card reader or local export.'))
             if len(self.catalog_systems) > 1:
-                rows.append(row('tool_filter', 'Change system' if self._platform_folder else 'Show games', '',
+                rows.append(row('tool_filter', 'Change system' if self._one_system else 'Show games', '',
                                 scanner.SYSTEM_LABELS.get(self.filter, 'All systems')))
             all_shown = all(g['path'] in self.selected for g in games)
             rows.append(row('tool_pack_bulk', 'Clear shown games' if all_shown else 'Select all shown games'))
@@ -409,6 +507,8 @@ class LibraryTools:
                          'Selected' if g['path'] in self.selected else 'Not selected', g['path']) for g in games]
         else:
             body = f"No eligible games in {self.origin.root}."
+            if self._pair_first:
+                body = f'Paired with {self._peer_label()}. No games offered.\n{body}'
             if self.repeat_note:
                 body += '\n' + self.repeat_note
             rows += [row('back', 'Choose another source or profile'),
@@ -417,16 +517,34 @@ class LibraryTools:
                      for p in self.profile['players'] if p['id'] in self.players]
         self.ui._show('pack_games', 'Choose games', body, rows, reset=reset)
 
-    def _start_wifi(self):
-        root, profile = self.origin.root, self.profile['id']
-        selected, players = tuple(sorted(self.selected)), tuple(sorted(self.players))
+    def _peer_label(self):
+        name, address = self.transfer.get('device'), self.transfer.get('peer')
+        return f'{name} ({address})' if name and address else name or address or 'the receiver'
+
+    def _wifi_selection(self):
+        return self.origin.root, tuple(sorted(self.selected)), self.profile['id'], tuple(sorted(self.players))
+
+    def _offer_wifi(self):
+        if self.transfer.get('phase') != 'connected' or self._wifi_stop.is_set():
+            return self._return_wifi()
+        if not self.selected or {g['system'] for g in self.catalog if g['path'] in self.selected} != {self.filter}:
+            return self.show_pack()
+        self._offer_id += 1
+        self._wifi_commands.put(('offer', (self._offer_id, self._wifi_selection())))
+        self._return_wifi()
+
+    def _start_wifi(self, *, pair_first):
+        if self._wifi_stop is not None:
+            return self._return_wifi()
+        self._pair_first = pair_first
+        pack = None if pair_first else self._wifi_selection()
+        self._offer_id = 0
         stop = self._wifi_stop = Event()
         updates = self._wifi_updates = SimpleQueue()
         allow = self._wifi_allow = Event()
         firewall_updates = SimpleQueue()
         commands = self._wifi_commands = SimpleQueue()
-        self._wifi_screen('', '', 'Preparing the selected games. You can go back to cancel.', '', '',
-                          {'phase': 'preparing'}, reset=True)
+        self._wifi_controls = None
 
         def manage_firewall(address):
             firewall = HomeFirewall.discover(address)
@@ -450,27 +568,56 @@ class LibraryTools:
         def serve():
             session = None
             firewall_thread = None
+            nearby = None
             try:
                 if stop.is_set():
                     return
-                from ..wifi_sender import start_sender
-                session = start_sender(root, selected, profile, players=players, cancel=stop)
+                from .. import wifi_sender
+                if pair_first:
+                    session = wifi_sender.start_pairing(cancel=stop)
+                else:
+                    root, selected, profile, players = pack
+                    session = wifi_sender.start_sender(root, selected, profile, players=players, cancel=stop)
+                if stop.is_set():
+                    return
                 firewall_thread = Thread(target=manage_firewall, args=(session.address,), name='wifi-firewall')
                 firewall_thread.start()
                 network, firewall_note = '', ''
                 previous = None
                 approved = False
+                offer_id, offer_error = 0, ''
                 while not stop.is_set():
-                    while not commands.empty():
-                        code = commands.get()
-                        if code and code == session.pair_code and not approved:
-                            session.approve()
-                            approved = True
+                    if pair_first and session.transfer['phase'] == 'waiting' and not session.closed:
+                        if nearby is None:
+                            nearby = _NearbyHandhelds(session.address)
+                        nearby.poll()
+                    elif nearby is not None:
+                        nearby.close()
+                        nearby = None
+                    while not stop.is_set() and not commands.empty():
+                        command, arg = commands.get()
+                        if command == 'approve':
+                            if arg and arg == session.pair_code and not approved:
+                                session.approve()
+                                approved = True
+                        elif command == 'invite':
+                            if nearby is not None and session.transfer['phase'] == 'waiting' and not session.closed:
+                                nearby.invite(arg)
+                        else:
+                            offer_id, (root, selected, profile, players) = arg
+                            try:
+                                session.offer(root, selected, profile, players=players)
+                                offer_error = ''
+                            except (ValueError, OSError) as exc:
+                                offer_error = f'No games offered: {exc}'
                     while not firewall_updates.empty():
                         network, firewall_note = firewall_updates.get()
                     closed = session.closed
+                    sample = dict(session.transfer, offer_id=offer_id, offer_error=offer_error)
+                    if nearby is not None and sample['phase'] == 'waiting':
+                        sample.update(nearby=nearby.devices, nearby_note=nearby.note)
                     current = ('' if closed else session.address, '' if approved or closed else session.pair_code,
-                               session.status, '' if closed else network, '' if closed else firewall_note, session.transfer)
+                               session.status, '' if closed else network, '' if closed else firewall_note, sample)
                     if current != previous:
                         updates.put(current)
                         previous = current
@@ -481,13 +628,18 @@ class LibraryTools:
                 updates.put(('', '', f'Cannot send: {exc}. Go back to try again.', '', '', {'phase': 'error'}))
             finally:
                 stop.set()
+                if nearby is not None:
+                    nearby.close()
                 if session is not None:
                     session.close()
                 if firewall_thread is not None:
                     firewall_thread.join()
 
-        self.ui._pool.submit(serve)
+        self._wifi_future = self._wifi_pool.submit(serve)
         self._wifi_timer.start()
+        self._wifi_screen('', '', 'Opening the CouchCHD listener. No games are shared.' if pair_first else
+                          'Preparing the selected games. You can go back to cancel.', '', '',
+                          {'phase': 'starting' if pair_first else 'preparing'}, reset=True)
 
     def _refresh_wifi(self):
         if self._wifi_stop is None:
@@ -498,8 +650,20 @@ class LibraryTools:
         if latest is not None:
             self._wifi_screen(*latest, reset=False)
 
+    def _return_wifi(self):
+        self._wifi_screen(*self._wifi_latest, reset=True)
+
     def _wifi_screen(self, address, code, status, network, firewall_note, sample, *, reset):
+        self._wifi_latest = (address, code, status, network, firewall_note, sample)
         phase = sample['phase']
+        ended = phase in ('closed', 'complete', 'error', 'disconnected')
+        if ended:
+            self._wifi_timer.stop()
+            address = code = network = firewall_note = ''
+        elif phase != 'pairing':
+            code = ''
+        if phase == 'connected' and sample.get('offer_id', 0) < self._offer_id:
+            phase, status = 'preparing', 'Checking the selected files before offering them.'
         sent, total = sample.get('sent', 0), sample.get('total', 0)
         rate = sample.get('rate', 0)
         view = dict(phase=phase, address=address, peer=sample.get('peer', ''), device=sample.get('device', ''),
@@ -509,38 +673,93 @@ class LibraryTools:
         if view != self.transfer:
             self.transfer = view
             self.ui.transferChanged.emit()
+        if not reset and self.ui.modal['kind'] != 'pack_wifi':
+            if not ended:
+                return  # Update the link indicator without moving the user out of the picker.
+            # A disconnected receiver cannot receive this selection. Ignore a pending read-only picker result.
+            self.ui._on_success = None
+            reset = True
+        nearby, nearby_note = sample.get('nearby', ()), sample.get('nearby_note', '')
         new_candidate = bool(code) and (reset or self._wifi_controls[0] != code)
-        controls = (code, status, phase, network, firewall_note)
+        list_changed = not reset and self._wifi_controls[1] != nearby
+        controls = (code, nearby, status, phase, network, firewall_note, nearby_note, sample.get('offer_error'))
         if not reset and controls == self._wifi_controls:
             return  # Do not rebuild the controller's focused list on every sample.
         self._wifi_controls = controls
-        ended = phase in ('closed', 'complete', 'error')
-        rows = [row('back', 'Return to games' if ended else 'Stop sending and go back')]
-        if phase in ('waiting', 'preparing'):
+        if self._pair_first:
+            section = 'Dashboard' if self.ui.tab == 0 else 'Libraries & devices'
+            action = ('Return' if ended else 'Stop listening and return' if phase in ('starting', 'waiting')
+                      else 'Cancel pairing and return' if phase in ('pairing', 'approved') else 'Disconnect and return')
+            rows = [row('back', f'{action} to {section}')]
+        else:
+            rows = [row('back', 'Return to games' if ended else 'Stop sending and go back')]
+        if self._pair_first and phase == 'connected':
+            rows.insert(0, row('tool_wifi_choose', 'Choose games to offer', 'Select a library, system and games.'))
+        if self._pair_first and ended:
+            rows.append(row('tool_wifi_retry', 'Listen for a handheld again', 'Start a new session with a new code.'))
+        rows.extend(row('tool_nearby_receiver', model or 'CouchCHD Receive', f'{ip} · Select to invite this receiver.',
+                        'Found · Not paired', ip) for ip, model in nearby)
+        if phase in ('starting', 'waiting'):
             rows.append(row('note', 'Need the Android app?', 'vip3rousmango.github.io/couchCHD/receive'))
         if network:
             rows.append(row('tool_wifi_firewall', 'Allow on home network',
                             f'On trusted Wi-Fi only: allow discovery and transfer from {network} for up to 10 minutes.'))
         elif firewall_note:
             rows.append(row('note', 'Host firewall', firewall_note))
-        elif phase == 'waiting':
-            rows.append(row('note', 'Can’t find this computer?', 'Use the same home network, or tap Enter host IP in Receive.'))
+        if phase == 'waiting':
+            host = address.partition(':')[0]
+            rows.append(row('note', 'Can’t find this computer?',
+                            f'Use the same home network. In Receive, choose Enter host IP and enter {host}.'))
         if code:
             rows.insert(1, row('tool_wifi_approve', f'Approve {code}', 'Only if the same code appears on your handheld.', '', code))
         body = status
+        if self._pair_first:
+            if phase == 'waiting':
+                body = (f'{len(nearby)} nearby. Select a receiver to invite it.' if nearby else
+                        'Listening. No nearby receivers found yet. Open CouchCHD Receive on the same Wi-Fi.')
+                body += ' You can also choose Find sender in Receive. No handheld is paired and no games are shared.'
+                if nearby_note:
+                    body += '\n' + nearby_note
+            elif phase == 'pairing':
+                body = f'{self._peer_label()} wants to pair. Compare the code on both devices.'
+            elif phase == 'approved':
+                body = f'Approved on this computer. Choose Codes match in Receive on {self._peer_label()} if the codes match.'
+            elif phase == 'connected':
+                body = f'Paired with {self._peer_label()}. No games offered yet.\n{status}'
+                if sample.get('offer_error'):
+                    body += '\n' + sample['offer_error']
         if phase == 'complete':
             body = 'Verified on the handheld. In Daijishō, open the platform and choose Sync.'
         if code:
             body += f'\nComparison code: {code}'
-        self.ui._show('pack_wifi', 'Send over Wi-Fi', body, rows, reset=reset or new_candidate)
+        self.ui._show('pack_wifi', 'Nearby handhelds' if self._pair_first else 'Send over Wi-Fi',
+                      body, rows, reset=reset or new_candidate or list_changed)
+
+    @property
+    def pairing_workflow(self):
+        return self._pair_first
+
+    def keeps_wifi(self, kind, target):
+        if kind == 'pack_wifi':
+            return True
+        return self._pair_first and (kind in ('export_source', 'pack_saved', 'pack_profiles', 'pack_players',
+                                              'pack_info', 'pack_system', 'pack_filter', 'pack_games', 'pack_source_error')
+                                     or (kind in ('locations', 'browse') and target == 'export_source'))
 
     def stop_wifi(self):
         if self._wifi_stop is not None:
             self._wifi_stop.set()
+            self._wifi_future.cancel()
             self._wifi_timer.stop()
             self._wifi_stop = None
+            self._wifi_latest = self._wifi_controls = None
+            self._pair_first = False
             self.transfer = {}
             self.ui.transferChanged.emit()
+
+    def close(self):
+        self.stop_wifi()
+        self._wifi_pool.shutdown(wait=True, cancel_futures=True)
 
     def export_to(self, dest, *, previous=False):
         origin = self.origin

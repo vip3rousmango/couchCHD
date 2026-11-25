@@ -15,6 +15,8 @@ ApplicationWindow {
     readonly property real marginX: width >= 1050 ? 36 * u : 16 * u
     readonly property bool compact: width < 1050
     readonly property bool inDialog: library.modal.kind !== ""
+    readonly property bool showingSystems: library.section === 1 && !library.queueVisible
+    readonly property var focusedSystem: showingSystems ? library.rows[mainIndex] : null
     property int mainIndex: 0
     property int dialogIndex: 0
     property bool closingApproved: false
@@ -24,12 +26,12 @@ ApplicationWindow {
     function selectIndex(list, index) {
         if (list.count === 0) return
         let target = Math.max(0, Math.min(list.count - 1, index))
-        if (list === mainList) mainIndex = target
-        else dialogIndex = target
+        if (list === dialogList) dialogIndex = target
+        else mainIndex = target
         list.positionViewAtIndex(target, ListView.Contain)
     }
     function route(action) {
-        let list = inDialog ? dialogList : mainList
+        let list = inDialog ? dialogList : showingSystems ? systemGrid : mainList
         let index = inDialog ? dialogIndex : mainIndex
         if (library.queueVisible && !inDialog) {
             if (action === "back") library.back()
@@ -40,12 +42,12 @@ ApplicationWindow {
         if (library.busy && !(inDialog && (library.modal.kind === "confirm" || library.modal.kind === "item")) && action !== "back") return
         switch (action) {
         case "up": case "down":
-            selectIndex(list, index + (action === "up" ? -1 : 1)); break
+            selectIndex(list, index + (action === "up" ? -1 : 1) * (list === systemGrid ? systemGrid.columns : 1)); break
         case "left": case "right":
             if (inDialog && bodyScroll.contentHeight > bodyScroll.height + 1) {
                 bodyScroll.contentY = Math.max(0, Math.min(bodyScroll.contentHeight - bodyScroll.height,
                         bodyScroll.contentY + (action === "left" ? -1 : 1) * Math.max(32, bodyScroll.height * .8)))
-            } else selectIndex(list, index + (action === "left" ? -4 : 4))
+            } else selectIndex(list, index + (action === "left" ? -1 : 1) * (list === systemGrid ? 1 : 4))
             break
         case "confirm": library.activate(index, false); break
         case "inspect": if (!inDialog) library.activate(index, true); break
@@ -69,7 +71,7 @@ ApplicationWindow {
                 else window.mainIndex = 0
             }
             Qt.callLater(function() {
-                let list = window.inDialog ? dialogList : mainList
+                let list = window.inDialog ? dialogList : window.showingSystems ? systemGrid : mainList
                 window.selectIndex(list, window.inDialog ? window.dialogIndex : window.mainIndex)
             })
         }
@@ -145,6 +147,7 @@ ApplicationWindow {
                 font.pixelSize: 24 * window.u; wrapMode: Text.Wrap
             }
             RowLayout {
+                visible: !window.showingSystems || window.height >= 620
                 Layout.fillWidth: true; Layout.topMargin: 7 * window.u; Layout.bottomMargin: 4 * window.u; spacing: 22 * window.u
                 Text { text: library.summary; color: "#d9ebbe"; font.pixelSize: 21 * window.u; font.weight: Font.DemiBold }
                 Item { Layout.fillWidth: true }
@@ -156,7 +159,8 @@ ApplicationWindow {
                 radius: 7 * window.u; color: "#253029"
                 ListView {
                     id: mainList; anchors.fill: parent; anchors.margins: 6 * window.u
-                    clip: true; model: library.queueVisible ? null : library.rows; spacing: 2 * window.u; currentIndex: window.mainIndex
+                    visible: !window.showingSystems
+                    clip: true; model: visible && !library.queueVisible ? library.rows : null; spacing: 2 * window.u; currentIndex: window.mainIndex
                     boundsBehavior: Flickable.StopAtBounds; keyNavigationEnabled: false
                     ScrollBar.vertical: ScrollBar {}
                     delegate: Entry {
@@ -166,12 +170,27 @@ ApplicationWindow {
                         onActivated: { window.mainIndex = index; window.route("confirm") }
                     }
                 }
+                GridView {
+                    id: systemGrid; anchors.fill: parent; anchors.margins: 3 * window.u
+                    visible: window.showingSystems; clip: true; model: visible ? library.rows : null
+                    readonly property int columns: Math.max(2, Math.floor(width / (182 * window.u)))
+                    cellWidth: width / columns; cellHeight: (window.height < 620 ? 80 : 102) * window.u
+                    currentIndex: window.mainIndex; keyNavigationEnabled: false; boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ScrollBar {}
+                    delegate: SystemTile {
+                        required property var modelData; required property int index
+                        width: systemGrid.cellWidth; height: systemGrid.cellHeight; unit: window.u
+                        entry: modelData; selected: index === window.mainIndex && !window.inDialog
+                        onActivated: { window.mainIndex = index; window.route("confirm") }
+                    }
+                }
             }
             RowLayout {
                 Layout.fillWidth: true; Layout.preferredHeight: 42 * window.u
                 Rectangle { width: 10 * window.u; height: width; radius: width / 2; color: library.busy ? "#ffd188" : "#b6d588" }
                 Text {
-                    Layout.fillWidth: true; text: library.status; textFormat: Text.PlainText
+                    Layout.fillWidth: true; text: window.focusedSystem && !library.busy
+                        ? window.focusedSystem.label + " · " + window.focusedSystem.detail : library.status; textFormat: Text.PlainText
                     color: "#c4d0c2"; font.pixelSize: 20 * window.u; elide: Text.ElideMiddle
                     Accessible.role: Accessible.StaticText
                 }
@@ -215,8 +234,8 @@ ApplicationWindow {
                     Command { label: "Back"; glyph: router.glyphs[1]; compact: true; unit: window.u; onActivated: window.route("back") }
                 }
                 TransferLink {
-                    visible: library.modal.kind === "pack_wifi"; Layout.fillWidth: true
-                    info: library.transferView; unit: window.u
+                    visible: !!library.transferView.phase; Layout.fillWidth: true
+                    info: library.transferView; hostKind: library.hostKind; unit: window.u
                 }
                 Flickable {
                     id: bodyScroll; Layout.fillWidth: true
