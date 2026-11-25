@@ -11,7 +11,7 @@ import threading
 from PySide6.QtCore import QObject, Property, QDir, QSettings, QStandardPaths, Signal, Slot
 
 from ..app import Backend
-from .. import cloud_ingest, profiles
+from .. import cloud_ingest, profiles, updater
 from . import steam
 
 SYSTEMS = {'psx': 'PlayStation', 'segacd': 'Sega CD', 'saturn': 'Sega Saturn', 'dreamcast': 'Dreamcast', 'ps2': 'PlayStation 2', 'psp': 'PSP'}
@@ -402,6 +402,7 @@ class Bridge(QObject):
             row('policy', 'After verification', POLICIES[self.policy][1], POLICIES[self.policy][0]),
             row('sound', 'Interface sounds', 'Quiet navigation ticks and batch feedback.', 'On' if self.sound else 'Off'),
             row('rumble', 'Controller vibration', 'Pulse on completion or when attention is needed.', 'On' if self.rumble else 'Off'),
+            row('update', 'Update CouchCHD', 'Check the public release and install it for your next launch.'),
             row('steam', 'Add to Steam', 'Register the launcher, grid artwork, and gamepad layout.'), row('exit', 'Exit CouchCHD')], reset=reset)
 
     def _pick(self, target, *, returning=False):
@@ -603,6 +604,13 @@ class Bridge(QObject):
             self.prefs.setValue(key, getattr(self, key))
             self.cue('tick' if key == 'sound' else 'done')
             return self._settings(False)
+        if key == 'update':
+            self._hide()
+            def updated(result):
+                title, message = result
+                self._report(title)
+                self._notice(title, message)
+            return self._work('Updating CouchCHD', lambda: updater.update(self._progress.emit), updated)
         if key == 'steam':
             self._hide()
             return self._work('Registering with Steam', steam.register, lambda msg: self._notice('Steam shortcut ready', msg))
