@@ -12,6 +12,7 @@ import zlib
 import vdf
 
 from ..ledger import install_new
+from ..menu_entry import host_home_path
 
 ASSETS = Path(__file__).with_name('assets')
 
@@ -21,7 +22,7 @@ class SteamRunning(RuntimeError):
 
 
 def _steam_dir() -> Path:
-    home = Path.home()
+    home = host_home_path(Path.home())
     candidates = [home / '.local/share/Steam', home / '.steam/steam',
                   home / 'Library/Application Support/Steam']
     flatpak = home / '.var/app/com.valvesoftware.Steam'
@@ -141,10 +142,11 @@ _MANUAL_NAMES = {'couchchd', 'run-couchchd', 'couchchd-x86_64', 'io.github.vip3r
 def _known_target(target: Path, launcher: Path, named: bool) -> bool:
     if not target.is_absolute():
         return False
+    target = host_home_path(target)
     name = target.name.casefold()
     if target == launcher:
         return True
-    data = Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share')
+    data = host_home_path(Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share'))
     if target == data / 'applications/io.github.vip3rousmango.CouchCHD.desktop':
         return True
     if ((name == 'run' or name in _APPIMAGES) and target.parent.parent == launcher.parent / 'builds'

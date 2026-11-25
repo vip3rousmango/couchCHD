@@ -12,7 +12,7 @@ import re
 import stat
 import xml.etree.ElementTree as ET
 
-from .menu_entry import install_script
+from .menu_entry import host_home_path, install_script
 
 _CLASSIC_SYSTEMS = Path('/etc/emulationstation/es_systems.cfg')
 _ESDE_PREFIXES = (Path('/usr/local/share/es-de'), Path('/usr/share/es-de'))
@@ -79,7 +79,7 @@ def _path(value: str) -> Path:
     path = Path.home() / value[2:] if value.startswith('~/') else Path(value)
     if not path.is_absolute() or '..' in path.parts:
         raise ValueError(f'expected an absolute configured path, got {value!r}')
-    return path
+    return host_home_path(path)
 
 
 def _extension(value: str) -> str:
@@ -256,7 +256,7 @@ def _esde(home: Path, launcher: Path, hint: Path | None) -> str | None:
 
 def register(launcher: Path, *, roms: Path | None = None) -> list[str]:
     """Best effort: a broken/missing frontend does not invalidate the desktop install."""
-    home = Path.home()
+    home = host_home_path(Path.home())
     messages = []
     fallback = 'Use the desktop Applications menu.'
     try:

@@ -55,7 +55,7 @@ def test_migrate_only_exact_managed_desktop_and_keep_replacement_icon(tmp_path, 
     entry.write_text(legacy)
     entry.chmod(0o640)
     refresh_desktop_artwork(launcher)
-    assert entry.read_text() == legacy.replace('Icon=applications-games', f'Icon={name}')
+    assert f'Icon={name}\n' in entry.read_text() and 'Categories=Utility;Compression;\n' in entry.read_text()
     assert entry.stat().st_mode & 0o777 == 0o640
     icon = tmp_path / f'icons/hicolor/scalable/apps/{name}.svg'
     assert '<svg' in icon.read_text()
@@ -67,3 +67,32 @@ def test_migrate_only_exact_managed_desktop_and_keep_replacement_icon(tmp_path, 
     assert 'Customized' in refresh_desktop_artwork(launcher)
     assert install_desktop(launcher) == entry and not icon.exists()
     assert entry.read_text() == legacy + 'Actions=custom;\n'
+
+
+@pytest.mark.parametrize('xdg', [False, True])
+def test_atomic_home_alias_registers_utilities_but_not_redirected_entries(tmp_path, monkeypatch, xdg):
+    from couchchd import cli, menu_entry
+    alias, homes = tmp_path / 'home', tmp_path / 'var/home'
+    account = 'Bazzite User'
+    logical, physical = alias / account, homes / account
+    physical.mkdir(parents=True)
+    alias.symlink_to('var/home', target_is_directory=True)
+    monkeypatch.setattr(menu_entry, '_HOME_ROOT', alias)
+    monkeypatch.setenv('HOME', str(logical))
+    monkeypatch.delenv('XDG_DATA_HOME', raising=False)
+    if xdg:
+        monkeypatch.setenv('XDG_DATA_HOME', str(logical / '.local/share'))
+    launcher = logical / '.local/share/couchchd/run-couchchd'
+    launcher.parent.mkdir(parents=True)
+    launcher.touch(mode=0o755)
+    assert cli.main(['--register-frontend', 'desktop', str(launcher)]) == 0
+    apps = physical / '.local/share/applications'
+    entry, = apps.glob('*.desktop')
+    assert f'Exec="{physical}/.local/share/couchchd/run-couchchd"\n' in entry.read_text()
+    assert 'Categories=Utility;Compression;' in entry.read_text()
+    foreign = tmp_path / 'unrelated'
+    apps.rename(foreign)
+    apps.symlink_to(foreign, target_is_directory=True)
+    old = (foreign / entry.name).read_bytes()
+    assert cli.main(['--register-frontend', 'desktop', str(launcher)]) != 0
+    assert (foreign / entry.name).read_bytes() == old

@@ -75,7 +75,7 @@ def main(argv=None):
     if args.yes and not args.purge:
         parser.error('--yes is only meaningful with --purge')
     if args.register_frontend:
-        from .menu_entry import install_desktop, install_script
+        from .menu_entry import host_home_path, install_desktop, install_script
         frontend, executable = args.register_frontend
         try:
             launcher = Path(executable).expanduser().absolute()
@@ -83,7 +83,8 @@ def main(argv=None):
                 raise ValueError(f'Not an executable CouchCHD launcher: {launcher}')
             if frontend == 'desktop':
                 from . import es_frontends
-                print('Applications menu:', install_desktop(launcher))
+                launcher = host_home_path(launcher)
+                print('Applications menu (Utilities):', install_desktop(launcher))
                 messages = es_frontends.register(launcher, roms=args.root)
                 if sys.platform == 'linux':
                     messages.append(_register_desktop_steam(launcher))

@@ -60,6 +60,12 @@ jobs:
             test -s /recalbox/share/system/.emulationstation/systemlist.xml
             test -f /recalbox/share/roms/ports/couchchd/CouchCHD.game
           else
+            entry="$XDG_DATA_HOME/applications/io.github.vip3rousmango.CouchCHD.desktop"
+            desktop-file-validate "$entry"
+            xvfb-run -a -s '-screen 0 1280x800x24 -extension GLX' bash -eu -c '
+              gio launch "$1"
+              timeout 60 xdotool search --sync --onlyvisible --name "^CouchCHD"
+            ' _ "$entry"
             python3 -m venv "$HOME/reader"
             grep '^vdf==' packaging/requirements-linux.txt > "$HOME/vdf.txt"
             "$HOME/reader/bin/pip" install --require-hashes --no-deps -r "$HOME/vdf.txt"

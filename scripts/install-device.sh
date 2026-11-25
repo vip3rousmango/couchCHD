@@ -2,7 +2,7 @@
 # No arguments: install the pinned GitHub release. SSH transports are optional.
 set -eu
 umask 077
-channel=v0.1.0-preview.6
+channel=v0.1.0-preview.7
 fail() { printf 'CouchCHD: %s\n' "$*" >&2; exit 1; }
 fetch() {
     curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
@@ -231,7 +231,10 @@ STEAM_LOG
     if [ "$update" = yes ]; then return 0; fi
     cleanup; trap - 0 HUP INT TERM
     printf 'Installed. Relaunch with: %s\n' "$launcher" >&2
-    "$launcher" --register-frontend "$frontend" "$launcher"
+    if ! "$launcher" --register-frontend "$frontend" "$launcher"; then
+        printf 'CouchCHD is installed, but menu registration did not finish.\n' >&2
+        [ "$frontend" = desktop ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || return 1
+    fi
     if [ "$frontend" = desktop ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
         exec "$launcher"
     fi

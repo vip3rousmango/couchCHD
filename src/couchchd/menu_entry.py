@@ -10,6 +10,19 @@ from .ledger import install_new
 
 _ASSETS = Path(__file__).parent / 'ui/assets'
 _DESKTOP_ID = 'io.github.vip3rousmango.CouchCHD'
+_HOME_ROOT = Path('/home')
+
+
+def host_home_path(path: Path) -> Path:
+    """Map Fedora Atomic's system alias, not links inside a user's home."""
+    if path.is_relative_to(_HOME_ROOT):
+        physical = _HOME_ROOT.parent / 'var/home'
+        try:
+            if _HOME_ROOT.parent / _HOME_ROOT.readlink() == physical:
+                return physical / path.relative_to(_HOME_ROOT)
+        except OSError:
+            pass  # Ordinary /home or unavailable; keep the original path checks.
+    return path
 
 
 def read_regular(path: Path) -> bytes | None:
@@ -79,7 +92,7 @@ def _desktop(launcher: Path, *, install: bool) -> tuple[Path, str]:
     # Two escaping layers: quoted Exec argument, then desktop-entry string.
     arg = ''.join('\\' + c if c in '\\"`$' else c for c in str(launcher))
     arg = arg.replace('\\', '\\\\').replace('%', '%%')
-    data = Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share')
+    data = host_home_path(Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share'))
     path = data / 'applications' / f'{_DESKTOP_ID}.desktop'
     icon = data / 'icons/hicolor/scalable/apps' / f'{_DESKTOP_ID}.svg'
     _check_path(path)
@@ -87,13 +100,13 @@ def _desktop(launcher: Path, *, install: bool) -> tuple[Path, str]:
     if previous is None and not install:
         return path, 'No registered desktop entry; no artwork changed.'
 
-    def entry(icon_name: str) -> bytes:
+    def entry(icon_name: str, categories: str) -> bytes:
         return ('[Desktop Entry]\nType=Application\nName=CouchCHD\n'
-                f'Exec="{arg}"\nIcon={icon_name}\nTerminal=false\nCategories=Game;Utility;\n').encode()
+                f'Exec="{arg}"\nIcon={icon_name}\nTerminal=false\nCategories={categories}\n').encode()
 
     # Do not parse/reserialize, or migrate a different installation's launcher.
-    legacy, current = entry('applications-games'), entry(_DESKTOP_ID)
-    if previous not in (None, legacy, current):
+    current = entry(_DESKTOP_ID, 'Utility;Compression;')
+    if previous not in (None, current, entry(_DESKTOP_ID, 'Game;Utility;'), entry('applications-games', 'Game;Utility;')):
         return path, 'Customized desktop entry kept; no artwork changed.'
     _check_path(icon)
     added = not icon.exists()

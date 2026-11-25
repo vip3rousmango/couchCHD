@@ -68,3 +68,18 @@ def test_install_launch_and_reject_damaged_update(target, transport):
     assert result.returncode != 0 and 'SHA-256 verification' in result.stderr
     assert launcher.read_bytes() == original
     assert subprocess.check_output([launcher], env=env, text=True).strip() == 'GUI'
+
+
+@pytest.mark.parametrize('graphical', [True, False])
+def test_menu_failure_does_not_hide_installed_gui(target, graphical):
+    tmp, env, _, image = target
+    executable(image, 'case "$2" in --version) echo version;; --register-frontend) echo "menu rejected" >&2; exit 1;; "") echo GUI;; esac')
+    digest = hashlib.sha256(image.read_bytes()).hexdigest()
+    (image.parent / 'SHA256SUMS-x86_64').write_text(f'{digest}  {image.name}\n')
+    env.pop('WAYLAND_DISPLAY', None)
+    if not graphical:
+        env.pop('DISPLAY', None)
+    result = subprocess.run(['sh', SCRIPTS / 'install-device.sh'], cwd=tmp, env=env, capture_output=True, text=True)
+    assert 'menu rejected' in result.stderr
+    assert ('GUI' in result.stdout) == graphical
+    assert (result.returncode == 0) == graphical
