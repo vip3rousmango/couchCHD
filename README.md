@@ -7,7 +7,7 @@ CouchCHD is a controller-first disc library compressor for the living room. It c
 Run this **on the target Linux device**. Use Konsole in Desktop Mode on Steam Deck/Bazzite, or open an SSH session to your retro appliance first:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/vip3rousmango/couchCHD/main/scripts/install-device.sh | sh
+curl -f https://vip3rousmango.github.io/couchCHD/i | sh
 ```
 
 This runs code from this repository as your current user. To inspect it first, download the script to a file, read it, then run `sh install-device.sh`. Don't use `sudo` on the Deck. No build machine, clone, Python installation, or GitHub login is required on the target.
