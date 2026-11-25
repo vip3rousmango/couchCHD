@@ -79,6 +79,10 @@ def main(argv=None):
         frontend, executable = args.register_frontend
         try:
             launcher = Path(executable).expanduser().absolute()
+            if frontend == 'recalbox':
+                from .recalbox_menu import register
+                register(launcher=launcher)
+                return 0
             if not launcher.is_file() or not os.access(launcher, os.X_OK):
                 raise ValueError(f'Not an executable CouchCHD launcher: {launcher}')
             if frontend == 'desktop':
@@ -88,10 +92,6 @@ def main(argv=None):
                 messages = es_frontends.register(launcher, roms=args.root)
                 if sys.platform == 'linux':
                     messages.append(_register_desktop_steam(launcher))
-            elif frontend == 'recalbox':
-                from .recalbox_menu import register
-                register(launcher=launcher)
-                return 0
             elif frontend == 'ports':
                 if args.root is None or not args.root.is_dir():
                     raise ValueError('Supply the existing ROM root of a shell-compatible ports system with --root.')

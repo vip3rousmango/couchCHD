@@ -2,6 +2,7 @@
 import os
 import re
 import shlex
+import stat
 from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.parsers import expat
@@ -13,6 +14,7 @@ from .stock_art import upgrade_stock
 
 SHARE = Path('/recalbox/share')
 _MEDIA = Path('/media')
+_MOUNTINFO = Path('/proc/self/mountinfo')
 _MOUNT_NAME = re.compile(r'[A-Za-z0-9 ._+-]+')
 _UUID = '27790d47-96e4-43be-a995-8c2ca3e6ea0d'
 _ROM_PATH = '%ROOT%/ports/couchchd'
@@ -32,25 +34,83 @@ def _fallback_mount(launcher: Path) -> Path | None:
     return None
 
 
-def _launcher(share: Path, selected: Path | None) -> Path:
+def _masked_card_mount(launcher: Path) -> bool:
+    """Accept one whole, writable exFAT SHARE, never a noexec or redirected mount."""
+    device = None
+    system_devices = set()
+    system_mounts = (Path('/'), Path('/boot'), SHARE.parent / 'boot')
+    for record in _MOUNTINFO.read_bytes().splitlines():
+        left, sep, right = record.partition(b' - ')
+        fields, fs = left.split(), right.split()
+        if not sep or len(fields) < 6 or len(fs) < 3:
+            return False
+        mount = Path(os.fsdecode(fields[4]).replace(r'\040', ' '))
+        if mount in system_mounts:
+            system_devices.add(fields[2])
+        if mount == SHARE:
+            options = (fields[5] + b',' + fs[2]).split(b',')
+            masks = [o[6:] for o in options if o.startswith(b'fmask=')]
+            if not masks:
+                masks = [o[6:] for o in options if o.startswith(b'umask=')]
+            if (device is not None or fields[3] != b'/' or fs[0] != b'exfat' or not fs[1].startswith(b'/dev/')
+                    or re.match(rb'/dev/(?:z?ram|nbd)[0-9]', fs[1])
+                    or b'noexec' in options or b'ro' in options or len(masks) != 1
+                    or not re.fullmatch(rb'[0-7]{1,4}', masks[0]) or int(masks[0], 8) & 0o111 != 0o111):
+                return False
+            device = fields[2]
+        elif mount.is_relative_to(SHARE) and (launcher.is_relative_to(mount) or mount.is_relative_to(launcher.parent)):
+            return False
+    return device is not None and device not in system_devices
+
+
+def is_card_launcher(launcher: Path) -> bool:
+    """Only the bootstrap's trusted, readable, non-executable SHARE wrapper may use sh."""
+    if launcher != SHARE / 'system/couchchd/run-couchchd':
+        return False
+    try:
+        for path in (SHARE.parent, SHARE, SHARE / 'system', launcher.parent, launcher):
+            info = path.lstat()
+            if info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o022:
+                return False
+            if path == launcher:
+                if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o111:
+                    return False
+            elif not stat.S_ISDIR(info.st_mode):
+                return False
+        if not _masked_card_mount(launcher):
+            return False
+        with launcher.open('rb') as stream:
+            lines = stream.read(8192).split(b'\n')
+        return (lines[0] == b'#!/bin/sh' and b'# CouchCHD managed launcher' in lines
+                and b'# CouchCHD Recalbox card launcher' in lines)
+    except OSError:
+        return False
+
+
+def _launcher(share: Path, selected: Path | None) -> tuple[Path, bool]:
     default = share / 'system/couchchd/run-couchchd'
-    if selected is None or selected == default:
-        return default
-    # The bootstrap probes executable storage and checks its filesystem and
-    # permissions. Do not register a stale directory after that disk is removed.
-    mount = _fallback_mount(selected)
-    if (share != SHARE or not (share / 'system').is_dir() or mount is None or not mount.is_mount()
-            or any(p.is_symlink() for p in (selected, *selected.parents))):
-        raise ValueError(f'Not an installed Recalbox volume launcher: {selected}')
-    return selected
+    launcher = selected or default
+    if launcher != default:
+        # Do not register a stale directory after the selected disk is removed.
+        mount = _fallback_mount(launcher)
+        if (share != SHARE or not (share / 'system').is_dir() or mount is None or not mount.is_mount()
+                or any(p.is_symlink() for p in (launcher, *launcher.parents))):
+            raise ValueError(f'Not an installed Recalbox volume launcher: {launcher}')
+    if launcher.is_file() and os.access(launcher, os.X_OK):
+        return launcher, False
+    if is_card_launcher(launcher):
+        return launcher, True
+    if selected is not None:
+        raise ValueError(f'Not an executable or managed Recalbox card launcher: {launcher}')
+    return default, False
 
 
-def _entry(launcher: Path) -> bytes:
+def _entry(launcher: Path, *, card: bool) -> bytes:
     # GameRunner appends emulator flags. Ignore those; never launch the UI for
     # a screensaver demo, and never execute the contents of a ROM-share file.
     script = ('for opt do [ "$opt" != -demo ] || exit 0; done; '
               'if [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}${QT_QPA_PLATFORM:-}" ]; then '
-              'export QT_QPA_PLATFORM=eglfs; fi; exec "$0"')
+              'export QT_QPA_PLATFORM=eglfs; fi; ') + ('exec /bin/sh "$0"' if card else 'exec "$0"')
     command = shlex.join(('/bin/sh', '-c', script, str(launcher)))
     return f'''  <system uuid="{_UUID}" name="couchchd" fullname="CouchCHD">
     <descriptor path="{_ROM_PATH}" theme="ports" extensions=".game" port="1" command={quoteattr(command)}/>
@@ -70,8 +130,8 @@ def _signature(node: ET.Element) -> tuple:
     return node.tag, node.attrib, tuple(map(_signature, node))
 
 
-def _merge(data: bytes | None, path: Path, share: Path, launcher: Path) -> bytes:
-    entry = _entry(launcher)
+def _merge(data: bytes | None, path: Path, share: Path, launcher: Path, card: bool) -> bytes:
+    entry = _entry(launcher, card=card)
     if data is None:
         return b'<?xml version="1.0"?>\n<systemList>\n' + entry + b'\n</systemList>\n'
     root = _xml(data, path)
@@ -79,7 +139,7 @@ def _merge(data: bytes | None, path: Path, share: Path, launcher: Path) -> bytes
         raise ValueError(f'Expected <systemList> in {path}')
     matches = [s for s in root.findall('system') if s.get('uuid') == _UUID or s.get('name') == 'couchchd'
                or s.find(f"descriptor[@path='{_ROM_PATH}']") is not None]
-    previous = None
+    previous = []
     if matches:
         if len(matches) != 1:
             raise ValueError(f'Conflicting CouchCHD system in {path}; leaving it unchanged')
@@ -92,8 +152,10 @@ def _merge(data: bytes | None, path: Path, share: Path, launcher: Path) -> bytes
             if old == share / 'system/couchchd/run-couchchd' or (share == SHARE and _fallback_mount(old)):
                 # A disconnected old volume is fine. Only a byte-identical
                 # stanza written by CouchCHD can be retargeted to a new one.
-                previous = _entry(old).lstrip()
-        if previous is None:
+                previous.append(_entry(old, card=False).lstrip())
+                if old == SHARE / 'system/couchchd/run-couchchd':
+                    previous.append(_entry(old, card=True).lstrip())
+        if not previous:
             raise ValueError(f'Conflicting CouchCHD system in {path}; leaving it unchanged')
 
     # Insert at the real root closing tag, not a match in a comment. Preserve
@@ -119,10 +181,11 @@ def _merge(data: bytes | None, path: Path, share: Path, launcher: Path) -> bytes
     parser.StartElementHandler = on_start
     parser.EndElementHandler = on_end
     parser.Parse(data, True)
-    if previous is not None:
-        if start < 0 or not data.startswith(previous, start):
+    if previous:
+        old_entry = next((p for p in previous if start >= 0 and data.startswith(p, start)), None)
+        if old_entry is None:
             raise ValueError(f'Conflicting CouchCHD system in {path}; leaving it unchanged')
-        return data[:start] + entry.lstrip() + data[start + len(previous):]
+        return data[:start] + entry.lstrip() + data[start + len(old_entry):]
     if data[end:end+2] == b'</':
         return data[:end] + b'\n' + entry + b'\n' + data[end:]
     if data[end-2:end] == b'/>':
@@ -197,7 +260,7 @@ def refresh_artwork(share: Path, launcher: Path | None = None) -> str:
     if any(p.is_symlink() for p in (share, *roms.parents, *config.parents, roms)):
         raise ValueError('Leaving redirected Recalbox paths unchanged.')
     system = read_regular(config)
-    if (system is None or _merge(system, config, share, _launcher(share, launcher)) != system
+    if (system is None or _merge(system, config, share, *_launcher(share, launcher)) != system
             or read_regular(roms / 'CouchCHD.game') != _MARKER):
         return 'No registered CouchCHD Recalbox port; no artwork changed.'
     games = read_regular(roms / 'gamelist.xml')
@@ -212,7 +275,7 @@ def register(share: Path | None = None, *, launcher: Path | None = None) -> None
         # Keep the historical CLI contract for SHARE/system/couchchd installs.
         share = (launcher.parents[2] if launcher and launcher.parts[-3:] == ('system', 'couchchd', 'run-couchchd')
                  else SHARE)
-    launcher = _launcher(share, launcher)
+    launcher, card = _launcher(share, launcher)
     config = share / 'system/.emulationstation/systemlist.xml'
     roms = share / 'roms/ports/couchchd'
     marker, gamelist = roms / 'CouchCHD.game', roms / 'gamelist.xml'
@@ -221,7 +284,7 @@ def register(share: Path | None = None, *, launcher: Path | None = None) -> None
             raise ValueError(f'Will not install through symlink {folder}')
         folder.mkdir(exist_ok=True)
     original = read_regular(config)
-    updated = _merge(original, config, share, launcher)
+    updated = _merge(original, config, share, launcher, card)
     previous = read_regular(marker)
     if previous not in (None, _MARKER):
         raise ValueError(f'Will not replace unmanaged {marker}')

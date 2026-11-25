@@ -8,6 +8,8 @@ import subprocess
 import sys
 from typing import Callable
 
+from .recalbox_menu import is_card_launcher
+
 _CHANNEL = 'https://vip3rousmango.github.io/couchCHD/channel.txt'
 _NUMBER = r'(0|[1-9][0-9]*)'
 _TAG = re.compile(rf'v{_NUMBER}\.{_NUMBER}\.{_NUMBER}(?:-preview\.{_NUMBER})?')
@@ -28,7 +30,7 @@ def _launcher_tag(launcher: Path) -> str:
     # Read the generated public marker as data; never source the launcher. The
     # installer compares again under its lock before switching the entry point.
     if not (launcher.is_absolute() and launcher.name == 'run-couchchd' and not launcher.is_symlink()
-            and launcher.is_file() and os.access(launcher, os.X_OK)):
+            and launcher.is_file() and (os.access(launcher, os.X_OK) or is_card_launcher(launcher))):
         return ''
     with launcher.open('rb') as stream:
         lines = stream.read(8192).split(b'\n')

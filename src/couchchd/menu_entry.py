@@ -37,7 +37,7 @@ def read_regular(path: Path) -> bytes | None:
     return path.read_bytes()
 
 
-def store_entry(path: Path, data: bytes, old: bytes | None, mode: int = 0o600) -> None:
+def store_entry(path: Path, data: bytes, old: bytes | None, mode: int | None = None) -> None:
     """Publish atomically; preserve permissions and detect concurrent customizations."""
     if data == old:
         return
@@ -47,13 +47,18 @@ def store_entry(path: Path, data: bytes, old: bytes | None, mode: int = 0o600) -
         with os.fdopen(fd, 'wb') as f:
             f.write(data)
             f.flush()
-            if os.name == 'posix' and old is not None:
-                info, staged = path.lstat(), os.fstat(f.fileno())
-                if (info.st_uid, info.st_gid) != (staged.st_uid, staged.st_gid):
-                    os.fchown(f.fileno(), info.st_uid, info.st_gid)
-                mode = stat.S_IMODE(info.st_mode)
-            if os.name == 'posix':
-                os.fchmod(f.fileno(), mode)
+            if os.name == 'posix' and (old is not None or mode is not None):
+                staged = os.fstat(f.fileno())
+                if old is not None:
+                    info = path.lstat()
+                    if (info.st_uid, info.st_gid) != (staged.st_uid, staged.st_gid):
+                        os.fchown(f.fileno(), info.st_uid, info.st_gid)
+                        staged = os.fstat(f.fileno())  # chown can clear set-id bits
+                    mode = stat.S_IMODE(info.st_mode)
+                # mkstemp requested 0600 for new data files. exFAT supplies a
+                # mount-wide mode instead and may reject a per-file chmod.
+                if stat.S_IMODE(staged.st_mode) != mode:
+                    os.fchmod(f.fileno(), mode)
             os.fsync(f.fileno())
         if old is None:
             install_new(tmp, path)

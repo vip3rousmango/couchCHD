@@ -206,3 +206,111 @@ def test_refuse_unmounted_nested_and_linked_install_locations(device):
         launcher = _install_wrapper(location / 'couchchd')
         assert main(['--register-frontend', 'recalbox', str(launcher)]) == 1
     assert not (share / 'system/.emulationstation').exists()
+
+
+@pytest.fixture
+def card(device, monkeypatch, tmp_path):
+    share, _ = device
+    launcher = _install_wrapper(share / 'system/couchchd')
+    for directory in (share.parent, share, share / 'system', launcher.parent):
+        directory.chmod(0o755)
+    launcher.write_text('#!/bin/sh\n# CouchCHD managed launcher\n# CouchCHD Recalbox card launcher\n'
+                        'export COUCHCHD_RELEASE_TAG=v0.1.0-preview.10\nprintf "%s:%s\\n" "$0" "$#"\n')
+    launcher.chmod(0o644)
+    mounts = tmp_path / 'mountinfo'
+    mounts.write_text(f'29 1 179:3 / {share} rw,nosuid - exfat /dev/mmcblk0p3 rw,fmask=0133,dmask=0022\n')
+    monkeypatch.setattr(recalbox_menu, '_MOUNTINFO', mounts)
+    return share, launcher, mounts
+
+
+def test_card_registration_launch_refresh_and_relocation(card, device, monkeypatch):
+    import tempfile
+
+    share, launcher, _ = card
+    # New Recalbox metadata uses the mode supplied by mkstemp / the mount,
+    # and replacement metadata must not require redundant chmod on exFAT.
+    mkstemp = tempfile.mkstemp
+    def masked_temp(*args, **kwargs):
+        fd, name = mkstemp(*args, **kwargs)
+        os.chmod(name, 0o644)
+        return fd, name
+
+    monkeypatch.setattr(tempfile, 'mkstemp', masked_temp)
+    def unsupported(*args):
+        raise PermissionError('exFAT has mount-wide modes')
+    monkeypatch.setattr(os, 'fchmod', unsupported)
+    config = share / 'system/.emulationstation/systemlist.xml'
+    direct = _install_wrapper(device[1][2] / 'couchchd')
+    assert main(['--register-frontend', 'recalbox', str(direct)]) == 0
+    original = config.read_bytes()
+    assert main(['--register-frontend', 'recalbox', str(launcher)]) == 0
+    command = ET.parse(config).find('system/descriptor').get('command')
+    roms = share / 'roms/ports/couchchd'
+    marker = roms / 'CouchCHD.game'
+    assert subprocess.check_output(['/bin/sh', '-c', command + ' "$1" -systemtype port',
+                                    'es', str(marker)], text=True) == f'{launcher}:0\n'
+    assert not subprocess.check_output(['/bin/sh', '-c', command + ' -demo 1'])
+    cover = roms / 'media/CouchCHD.png'
+    cover.unlink()
+    assert 'installed' in launcher_art.refresh(launcher) and cover.is_file()
+    assert main(['--register-frontend', 'recalbox', str(direct)]) == 0
+    assert config.read_bytes() == original
+
+
+@pytest.mark.parametrize('kind', ['noexec', 'ro', 'partial-mask', 'other-fs', 'nested', 'unmarked',
+                                  'redirected', 'writable', 'foreign-path', 'generic-port', 'system-device'])
+def test_no_shell_exception_outside_managed_card(card, kind):
+    share, launcher, mounts = card
+    record = mounts.read_text()
+    frontend = 'recalbox'
+    if kind in ('noexec', 'ro'):
+        mounts.write_text(record.replace('rw,nosuid', f'{kind},nosuid'))
+    elif kind == 'partial-mask':
+        mounts.write_text(record.replace('0133', '0022'))
+    elif kind == 'other-fs':
+        mounts.write_text(record.replace('exfat', 'vfat'))
+    elif kind == 'nested':
+        mounts.write_text(record + f'30 29 8:1 / {launcher.parent} rw - exfat /dev/sda rw,fmask=0133\n')
+    elif kind == 'system-device':
+        mounts.write_text(record + '30 1 179:3 / /boot rw - exfat /dev/mmcblk0p3 rw,fmask=0133\n')
+    elif kind == 'unmarked':
+        launcher.write_text('#!/bin/sh\n# CouchCHD managed launcher\n')
+    elif kind == 'redirected':
+        foreign = launcher.rename(launcher.with_name('other'))
+        launcher.symlink_to(foreign)
+    elif kind == 'writable':
+        launcher.parent.chmod(0o777)
+    elif kind == 'foreign-path':
+        launcher = launcher.rename(share / 'run-couchchd')
+    else:
+        frontend = 'ports'
+    assert main(['--register-frontend', frontend, str(launcher), '--root', str(share)]) == 1
+    assert not (share / 'ports/CouchCHD.sh').exists()
+    assert not (share / 'system/.emulationstation/systemlist.xml').exists()
+
+
+def test_card_updater_recognizes_stable_path_until_remount(card, monkeypatch, tmp_path):
+    from couchchd import updater
+
+    _, launcher, mounts = card
+    tag = 'v0.1.0-preview.10'
+    installer = tmp_path / 'installer/install-device.sh'
+    installer.parent.mkdir()
+    installer.write_text(f'''set -eu
+test "$1" = --apply-update && test "$2" = v0.1.0-preview.11 &&
+    test "$3" = {tag} && test "$4" = {shlex.quote(str(launcher))} && test ! -x "$4" || exit 1
+echo 'CouchCHD: Checked stable launcher'
+''')
+    monkeypatch.setenv('COUCHCHD_RELEASE_TAG', tag)
+    monkeypatch.setenv('COUCHCHD_LAUNCHER', str(launcher))
+    monkeypatch.setattr(updater.sys, 'platform', 'linux')
+    monkeypatch.setattr(updater.sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(updater.sys, '_MEIPASS', str(tmp_path), raising=False)
+    monkeypatch.setattr(updater, '_channel_tag', lambda env: tag)
+    assert updater.update(lambda _: None)[0] == 'Already up to date'
+    monkeypatch.setattr(updater, '_channel_tag', lambda env: 'v0.1.0-preview.11')
+    progress = []
+    assert updater.update(progress.append)[0] == 'Update installed'
+    assert 'Checked stable launcher' in progress
+    mounts.write_text(mounts.read_text().replace('rw,nosuid', 'rw,noexec'))
+    assert updater.update(lambda _: None)[0] == 'Manual update required'
