@@ -2,6 +2,35 @@
 
 CouchCHD is a controller-first disc library compressor for the living room. It converts supported disc images with MAME's `chdman`, verifies the result, builds portable multi-disc playlists, and keeps the originals until you explicitly purge them. It does not download games. Use disc images you are authorized to process.
 
+## One-command device setup (private SSH)
+
+**Once on Bazzite:** keep this checkout at `~/couchCHD`. Put each trusted Linux build **and its matching `SHA256SUMS-<arch>`** in `dist/release/<arch>/`. These are the directories produced by `scripts/build_linux.sh` on native Debian 12 build machines. With a private Actions build, the equivalent download from the checkout is:
+
+```sh
+gh run download RUN_ID -n release-x86_64 -D dist/release/x86_64
+gh run download RUN_ID -n release-aarch64 -D dist/release/aarch64
+```
+
+Only the target architecture is required. The source checkout alone is not a binary build. Do not generate a new checksum for an untrusted download.
+
+**Pi 4 / Recalbox — type this on Bazzite**, from the checkout, substituting your normal SSH destination:
+
+```sh
+python3 scripts/send-device.py root@recalbox.local
+```
+
+Bazzite probes the target over SSH, streams the matching build and authenticates it against the build manifest. No Python, GitHub token, inbound HTTP server, or internet connection is needed on the Pi. Installation uses `/recalbox/share/system/couchchd`. First launch runs a **headless scan** of `/recalbox/share/roms` and prints the result over SSH. It does not convert or purge anything. For the TV UI, first stop EmulationStation normally, then run `/recalbox/share/system/couchchd/run-couchchd` on the Pi. The ARM bundle requires 64-bit userspace, glibc 2.36+ and working graphics drivers for the UI.
+
+**Steam Deck — type this in Desktop Mode’s Konsole.** Set `host` to your Bazzite SSH login; Bazzite must accept SSH connections. Confirm its host-key fingerprint on first use. SSH keys avoid repeated password prompts.
+
+```sh
+host=user@bazzite.local; ssh "$host" 'cat couchCHD/scripts/install-device.sh' | sh -s -- "$host"
+```
+
+The Deck downloads the x86-64 AppImage from Bazzite, checks SHA-256, and opens the UI as your normal desktop user. Relaunch with `~/.local/share/couchchd/run-couchchd` (under `$XDG_DATA_HOME` if set). If the Deck accepts SSH, the Bazzite push command also works with `deck@steamdeck.local`; a display-less session prints the launcher path instead of opening a window.
+
+Both paths stage and test the executable before switching the launcher. Repeating setup reuses the same build directory. Distinct previous builds remain under `builds/`; configs, originals, backups and the undo ledger are not replaced. No release is published and no system partition is remounted.
+
 ## Run from source
 
 Python 3.11+; `chdman` 0.256 or newer is required **for conversion and extraction**, not for scanning. Use the project-built binary, put a supported `chdman` on `PATH`, or set `COUCHCHD_CHDMAN` to its absolute path. Optional cloud ingestion uses an already configured `rclone` installation. A mounted NAS needs no rclone configuration.

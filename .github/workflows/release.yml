@@ -36,6 +36,25 @@ jobs:
           test "$(uname -m)" = '${{ matrix.arch }}'
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           bash scripts/build_linux.sh
+      - name: Exercise device setup with the built distribution
+        run: |
+          set -euo pipefail
+          arch=$(uname -m)
+          out="dist/release/$arch"
+          export HOME=$(mktemp -d) XDG_DATA_HOME=$(mktemp -d)
+          if [[ $arch == aarch64 ]]; then
+            # This job runs in a disposable Debian container, not on a user's Pi.
+            mkdir -p /recalbox/share/{system,roms}
+            asset=CouchCHD-Recalbox-aarch64.tar.gz
+            launcher=/recalbox/share/system/couchchd/run-couchchd
+          else
+            asset=CouchCHD-x86_64.AppImage
+            launcher="$XDG_DATA_HOME/couchchd/run-couchchd"
+          fi
+          test "$(sh scripts/install-device.sh --probe)" = "$arch"
+          digest=$(awk -v f="$asset" '$2 == f {print $1}' "$out/SHA256SUMS-$arch")
+          sh scripts/install-device.sh --receive "$arch" "$digest" < "$out/$asset"
+          "$launcher" --version
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-${{ matrix.arch }}
