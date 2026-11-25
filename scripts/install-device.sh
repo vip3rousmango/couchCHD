@@ -37,7 +37,7 @@ install() {
     case ${1:-} in
         '') [ "$#" = 0 ] || fail 'Empty SSH host.'
             transport=github
-            release=https://github.com/vip3rousmango/couchCHD/releases/download/v0.1.0-preview.1
+            release=https://github.com/vip3rousmango/couchCHD/releases/download/v0.1.0-preview.2
             command -v curl >/dev/null 2>&1 || fail 'The GitHub installer requires curl with HTTPS support.'
             printf 'Installing %s from %s\n' "$asset" "$release" >&2
             manifest=$(fetch "$release/SHA256SUMS-$arch") || fail "Cannot download release manifest. Check your connection and whether $release is available."
