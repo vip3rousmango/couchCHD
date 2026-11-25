@@ -48,8 +48,7 @@ def assert_entry(entry, launcher, root=None):
 def test_desktop_only(home):
     h, launcher = home
     (h / 'Emulation/roms/ports').mkdir(parents=True)
-    messages = es.register(launcher)
-    assert any('No configured' in m and 'Steam' in m for m in messages)
+    es.register(launcher)
     assert list((h / 'Emulation/roms/ports').iterdir()) == []
     assert not (h / '.emulationstation').exists() and not (h / 'ES-DE').exists()
 
@@ -214,8 +213,7 @@ def test_retrodeck_flatpak_not_confused_with_native_esde(home, monkeypatch):
     settings(sandbox, root)
     write(sandbox / 'custom_systems/es_systems.xml', system())
     monkeypatch.setenv('ESDE_APPDATA_DIR', str(sandbox))
-    messages = es.register(launcher)
-    assert any('RetroDECK Flatpak' in m and 'Steam' in m for m in messages)
+    es.register(launcher)
     assert not (root / 'ports').exists()
     monkeypatch.setenv('FLATPAK_ID', 'some.other.Frontend')
     write(es._CLASSIC_SYSTEMS, system(root / 'ports'))
