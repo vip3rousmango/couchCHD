@@ -31,7 +31,13 @@ ApplicationWindow {
     function route(action) {
         let list = inDialog ? dialogList : mainList
         let index = inDialog ? dialogIndex : mainIndex
-        if (library.busy && !(inDialog && library.modal.kind === "confirm") && action !== "back") return
+        if (library.queueVisible && !inDialog) {
+            if (action === "back") library.back()
+            else if (!progressView.navigate(action)) return
+            library.cue("tick")
+            return
+        }
+        if (library.busy && !(inDialog && (library.modal.kind === "confirm" || library.modal.kind === "item")) && action !== "back") return
         switch (action) {
         case "up": case "down":
             selectIndex(list, index + (action === "up" ? -1 : 1)); break
@@ -77,17 +83,18 @@ ApplicationWindow {
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: window.marginX; anchors.rightMargin: window.marginX
                 spacing: 12 * window.u
-                Image { Layout.preferredWidth: 38 * window.u; Layout.preferredHeight: 38 * window.u; source: "../assets/mark.svg"; sourceSize: Qt.size(88,88) }
+                Image { visible: !library.queueVisible; Layout.preferredWidth: 38 * window.u; Layout.preferredHeight: 38 * window.u; source: "../assets/mark.svg"; sourceSize: Qt.size(88,88) }
                 Text { text: "CouchCHD"; color: "#eff2e9"; font.pixelSize: 29 * window.u; font.weight: Font.Bold; font.letterSpacing: -1 }
                 Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 25 * window.u; color: "#516052" }
                 Text {
                     Layout.fillWidth: true; text: library.location; textFormat: Text.PlainText
                     elide: Text.ElideMiddle; color: "#c0caba"; font.pixelSize: 21 * window.u
                 }
-                Command { label: "Settings"; glyph: router.glyphs[4]; compact: true; unit: window.u; enabled: !library.busy; onActivated: window.route("settings") }
+                Command { visible: !library.queueVisible; label: "Settings"; glyph: router.glyphs[4]; compact: true; unit: window.u; enabled: !library.busy; onActivated: window.route("settings") }
             }
         }
         Rectangle {
+            visible: !library.queueVisible
             Layout.fillWidth: true; Layout.preferredHeight: 55 * window.u; color: "#202b26"
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: window.marginX; anchors.rightMargin: window.marginX; spacing: 6 * window.u
@@ -117,6 +124,7 @@ ApplicationWindow {
             }
         }
         ColumnLayout {
+            visible: !library.queueVisible
             Layout.fillWidth: true; Layout.fillHeight: true
             Layout.leftMargin: window.marginX; Layout.rightMargin: window.marginX
             Layout.topMargin: window.height < 700 ? 12 : 25 * window.u
@@ -140,14 +148,14 @@ ApplicationWindow {
                 Text { text: library.summary; color: "#d9ebbe"; font.pixelSize: 21 * window.u; font.weight: Font.DemiBold }
                 Item { Layout.fillWidth: true }
                 Text { text: library.space + " free at scan"; color: "#d3dbcf"; font.pixelSize: 21 * window.u }
-                Text { visible: !window.compact || window.width >= 840; text: (library.operation === "Compressing discs" ? "This batch: " : "Last batch: ") + library.savings + " saved"; color: "#d3dbcf"; font.pixelSize: 21 * window.u }
+                Text { visible: !window.compact || window.width >= 840; text: "Last batch: " + library.savings + " saved"; color: "#d3dbcf"; font.pixelSize: 21 * window.u }
             }
             Rectangle {
                 Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 40
                 radius: 7 * window.u; color: "#253029"
                 ListView {
                     id: mainList; anchors.fill: parent; anchors.margins: 6 * window.u
-                    clip: true; model: library.rows; spacing: 2 * window.u; currentIndex: window.mainIndex
+                    clip: true; model: library.queueVisible ? null : library.rows; spacing: 2 * window.u; currentIndex: window.mainIndex
                     boundsBehavior: Flickable.StopAtBounds; keyNavigationEnabled: false
                     ScrollBar.vertical: ScrollBar {}
                     delegate: Entry {
@@ -168,7 +176,13 @@ ApplicationWindow {
                 }
             }
         }
+        QueueView {
+            id: progressView
+            Layout.fillHeight: true; Layout.fillWidth: true
+            visible: library.queueVisible; unit: window.u; gutter: window.marginX; dialogOpen: window.inDialog
+        }
         Rectangle {
+            visible: !library.queueVisible
             Layout.fillWidth: true; Layout.preferredHeight: 51 * window.u; color: "#111a16"
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: window.marginX; anchors.rightMargin: window.marginX; spacing: 12 * window.u

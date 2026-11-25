@@ -112,12 +112,15 @@ def test_mounted_ingest_one_disc_at_a_time_and_early_close(tmp_path):
     a, track = disc(system, 'Disc A (日本)'); b, _ = disc(system, 'Disc B (日本)')
     disc(root / '_couchchd_backup/PS1', 'unused')
     put(system / 'fresh.cue', b'unfinished')
-    with closing(cloud_ingest.games(str(root), scratch, {'psx'}, threading.Event())) as iterator:
-        game, output = next(iterator)
+    events = []
+    with closing(cloud_ingest.games(str(root), scratch, {'psx'}, threading.Event(), events.append)) as iterator:
+        game, output, key = next(iterator)
+        assert key == str(a) and [(e.key, e.stage) for e in events] == [(key, 'queued'), (key, 'preparing')]
         assert output == Path('psx/Nested/Disc A (日本).chd') and game.frames == (1,)
         assert all(p.is_relative_to(scratch) for p in game.files)
         assert len(list(scratch.iterdir())) == 1
-        game2, output2 = next(iterator)
+        game2, output2, key2 = next(iterator)
+        assert key2 == str(b)
         assert not game.source.exists() and game2.source.exists()
         assert output2 == Path('psx/Nested/Disc B (日本).chd')
     assert not list(scratch.iterdir())
@@ -182,11 +185,14 @@ def test_cloud_pulls_only_referenced_tracks_then_cleans_up(tmp_path, monkeypatch
                'PS1/Two.cue': _CUE, 'PS1/unused.bin': b'not referenced', 'PS1/partial.cue': b'partial'}
     actions = remote_transport(monkeypatch, objects, recent=['PS1/partial.cue'])
     scratch = tmp_path / 'scratch'
-    with closing(cloud_ingest.games('vault:', scratch, {'psx'}, threading.Event())) as queue:
-        first, path = next(queue)
+    events = []
+    with closing(cloud_ingest.games('vault:', scratch, {'psx'}, threading.Event(), events.append)) as queue:
+        first, path, key = next(queue)
+        assert key == 'vault:PS1/One.cue' and events[-1].key == key
         assert actions == ['PS1/One.cue', 'PS1/Tracks/t01.bin']
         assert path == Path('psx/One.chd') and first.frames == (1,)
-        second, path = next(queue)
+        second, path, key = next(queue)
+        assert key == 'vault:PS1/Two.cue' and events[-1].key == key
         assert not first.source.exists() and second.source.exists() and path == Path('psx/Two.chd')
         assert list(queue) == []
     assert actions == ['PS1/One.cue', 'PS1/Tracks/t01.bin', 'PS1/Two.cue', 'PS1/Tracks/t01.bin']
@@ -196,8 +202,10 @@ def test_cloud_pulls_only_referenced_tracks_then_cleans_up(tmp_path, monkeypatch
 @pytest.mark.parametrize('ref', ['../private.bin', '/etc/private.bin', 'C:\\private.bin', 'absent.bin'])
 def test_cloud_never_pulls_unsafe_or_missing_tracks(tmp_path, monkeypatch, ref):
     actions = remote_transport(monkeypatch, {'psx/Game.cue': _CUE.replace(b'tracks/T01.BIN', ref.encode())})
+    events = []
     with pytest.raises(ValueError):
-        list(cloud_ingest.games('vault:', tmp_path, {'psx'}, threading.Event()))
+        list(cloud_ingest.games('vault:', tmp_path, {'psx'}, threading.Event(), events.append))
+    assert events[-1].key == 'vault:psx/Game.cue' and events[-1].stage == 'failed'
     assert actions == ['psx/Game.cue'] and not list(tmp_path.iterdir())
 
 

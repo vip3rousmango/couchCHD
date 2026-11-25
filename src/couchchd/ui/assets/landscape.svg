@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="430" viewBox="0 0 920 430">
+  <title>CouchCHD — landscape library tile</title>
+  <rect width="920" height="430" fill="#192221"/>
+  <!-- One side of a record sleeve, with the disc projecting beyond its edge. -->
+  <g fill="none" stroke="#dbf483">
+    <path d="M966 209a221 221 0 1 1 0-176" stroke-width="33"/>
+    <path d="M915 187a166 166 0 1 1 0-132" stroke-width="12"/>
+    <path d="M876 169a123 123 0 1 1 0-96" stroke-width="3"/>
+    <circle cx="763" cy="121" r="30" stroke-width="9"/>
+  </g>
+  <path d="M42 81h353m-353 0v15m353-15v15" fill="none" stroke="#738078" stroke-width="2"/>
+  <g font-family="sans-serif" fill="#f1f1e9">
+    <text x="38" y="319" font-size="88" font-weight="bold" letter-spacing="-3">CouchCHD</text>
+    <text x="43" y="373" font-size="29">Disc library utility</text>
+  </g>
+  <path d="M731 386h148" stroke="#738078" stroke-width="2"/>
+  <path d="M852 386h27" stroke="#dbf483" stroke-width="6"/>
+</svg>

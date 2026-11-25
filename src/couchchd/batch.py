@@ -10,9 +10,11 @@ from collections import Counter, deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import nullcontext
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from . import cloud_ingest, converter, hardware, scanner
+from .telemetry import ItemProgress
 
 GIB = 1024**3
 NETWORK = {'nfs', 'cifs', 'sshfs'}
@@ -56,18 +58,31 @@ class Job:
     game: scanner.Game
     output: Path
     local: bool
+    origin: str | None = None  # ingest scratch paths are not persistent identities
+
+    def report(self, callback, stage, percent=None, mib_s=None, cpu_percent=None, detail=''):
+        if callback is not None:
+            callback(ItemProgress(self.origin or str(self.game.source), self.game.source.name, self.game.system,
+                                  stage, percent, mib_s, cpu_percent, detail))
 
 
 class Batch:
-    def __init__(self, root, scratch, db, batch, tool, guard, plan, quarantine, immediate, progress, cancel):
+    def __init__(self, root, scratch, db, batch, tool, guard, plan, quarantine, immediate, progress, cancel,
+                 on_item=None):
         self.root, self.scratch, self.db, self.batch = root, scratch, db, batch
         self.tool, self.guard, self.plan = tool, guard, plan
-        self.quarantine, self.progress, self.cancel = quarantine, progress, cancel
+        self.quarantine, self.cancel, self.on_item = quarantine, cancel, on_item
+        self.native_progress = progress
+        self.progress = progress or (lambda _: None)
+        # The coordinator sees the device's full available set; portable_budget
+        # may narrow the worker's CPU affinity before convert() starts.
+        self.device_cpus = hardware.cpu_count() if on_item is not None else 0
         self.immediate = immediate
         self.outputs = []
         self.errors = []
         self.saved = 0
         self.paused = ''
+        self.interrupt_stage = 'cancelled'
         self.sources = set()
         self.root_identity = fingerprint(root)[:2]
 
@@ -89,7 +104,10 @@ class Batch:
     def _prepare(self, job, work, stage, target, threads):
         context = cloud_ingest.stage(job.game, work, cancel=self.cancel) if stage else nullcontext(job.game)
         with context as game:
-            converter.convert(game, target, self.tool, cancel=self.cancel, threads=threads, progress=self.progress)
+            on_stage = partial(job.report, self.on_item) if self.on_item is not None else None
+            converter.convert(game, target, self.tool, cancel=self.cancel, threads=threads,
+                              progress=self.native_progress, on_stage=on_stage, device_cpus=self.device_cpus,
+                              fast_cd=self.plan.portable)
         job.game.assert_unchanged()
 
     def _run_job(self, job, work, stage, target, threads):
@@ -105,7 +123,10 @@ class Batch:
             raise InterruptedError('Batch cancelled; input retained.')
         job.game.assert_unchanged()
         size = prepared.stat().st_size
+        job.report(self.on_item, 'publishing')
         self.progress(f'Publishing: {job.output.name}')
+        if self.cancel.is_set():
+            raise InterruptedError('Batch cancelled before publication; input retained.')
         self.db.publish(self.batch, job.output, lambda stage: publish_prepared(prepared, stage))
         self.outputs.append(job.output)
         # Count distinct input files: shared tracks do not represent duplicate savings.
@@ -128,29 +149,54 @@ class Batch:
                 self.db.purge_job(self.batch, backups)
 
     def _error(self, exc, name):
+        stage = 'failed'
         if ((isinstance(exc, OSError) and exc.errno == errno.ENOSPC)
                 or getattr(exc, 'sqlite_errorcode', None) == sqlite3.SQLITE_FULL):
             self.paused = 'Storage full. Free space, then resume the batch.'
+            self.interrupt_stage = stage = 'paused'
             self.cancel.set()  # running converters observe this and terminate their children
-        elif isinstance(exc, InterruptedError) and self.cancel.is_set() and not self.paused:
-            self.paused = 'Cancelled. Remaining inputs were not moved.'
+        elif isinstance(exc, InterruptedError) and self.cancel.is_set():
+            stage = self.interrupt_stage
+            if not self.paused:
+                self.paused = 'Cancelled. Remaining inputs were not moved.'
         message = f'{name}: {exc}'
         self.errors.append(message)
         self.progress(message)
+        return stage
 
     def process(self, jobs):
         if not jobs:
             return
-        total = sum(j.game.size for j in jobs)
-        if hardware.free_bytes(self.root) < total * 0.6:
-            jobs = sorted(jobs, key=lambda j: j.game.size)
+        # Ingest announces its source before it starts the potentially long download.
+        if self.on_item is not None:
+            for job in jobs:
+                if job.local:
+                    job.report(self.on_item, 'queued')
         pending = deque(jobs)
+        try:
+            self._dispatch(pending)
+        except BaseException as exc:
+            for job in pending:
+                job.report(self.on_item, 'skipped', detail=f'Batch stopped before conversion: {exc}')
+            raise
+        if self.cancel.is_set() and not self.paused:
+            self.paused = 'Cancelled. Verified jobs were retained; remaining inputs were not moved.'
+        for job in pending:
+            job.report(self.on_item, self.interrupt_stage if self.cancel.is_set() else 'paused',
+                       detail=self.paused)
+
+    def _dispatch(self, pending):
+        total = sum(j.game.size for j in pending)
+        if hardware.free_bytes(self.root) < total * 0.6:
+            ordered = sorted(pending, key=lambda j: j.game.size)
+            pending.clear()
+            pending.extend(ordered)
         reserved = Counter()
         active = {}
         previous_reason = ''
         # One portable disc owns the available compression CPUs; an entire
         # library on an SD card must not become competing random writers.
-        width = 1 if self.plan.portable else min(len(jobs), self.plan.cpus, 4)
+        width = 1 if self.plan.portable else min(len(pending), self.plan.cpus, 4)
         with ThreadPoolExecutor(max_workers=width) as pool:
             try:
                 while pending or active:
@@ -189,13 +235,16 @@ class Batch:
                                 break
                             target = work / (uuid.uuid4().hex + '.chd.part')
                             self.progress(f'Preparing: {job.game.source.name}')
+                            if job.local:
+                                job.report(self.on_item, 'preparing')
                             dest_identity = fingerprint(job.output.parent)[:2]
                             future = pool.submit(self._run_job, job, work, stage, target, cpus // cap)
                             active[future] = job, target, needs, dest_identity
                             for dev, (_, amount) in needs.items():
                                 reserved[dev] += amount
                         except (OSError, RuntimeError, ValueError) as exc:
-                            self._error(exc, job.game.source.name)
+                            stage = self._error(exc, job.game.source.name)
+                            job.report(self.on_item, stage, detail=str(exc))
                         pending.popleft()
                     if not active:
                         if self.paused or self.cancel.is_set() or not pending:
@@ -205,6 +254,8 @@ class Batch:
                     done, _ = wait(active, timeout=0.25, return_when=FIRST_COMPLETED)
                     for future in done:
                         job, target, needs, dest_identity = active.pop(future)
+                        published_before = len(self.outputs)
+                        stage, detail = 'failed', 'Batch interrupted.'
                         try:
                             future.result()
                             if (fingerprint(self.root)[:2] != self.root_identity
@@ -212,16 +263,32 @@ class Batch:
                                 raise OSError('Destination mount changed; prepared output was not published.')
                             self._publish(job, target)
                         except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
-                            self._error(exc, job.game.source.name)
+                            stage = self._error(exc, job.game.source.name)
+                            detail = str(exc)
+                        else:
+                            stage, detail = 'done', ''
                         finally:
-                            target.unlink(missing_ok=True)
+                            try:
+                                target.unlink(missing_ok=True)
+                            except OSError as exc:
+                                stage = self._error(exc, job.game.source.name)
+                                detail = f'{detail}; {exc}' if detail else str(exc)
                             for dev, (_, amount) in needs.items():
                                 reserved[dev] -= amount
+                            if len(self.outputs) > published_before:
+                                # Quarantine, purge, or scratch cleanup can fail *after*
+                                # the ledger has committed a verified CHD.
+                                stage = 'done'
+                                if detail:
+                                    detail = f'CHD verified and published. Post-publication error: {detail}'
+                            job.report(self.on_item, stage, 100.0 if stage == 'done' else None, detail=detail)
             finally:
                 if active:
                     self.cancel.set()
                     wait(active)
-                    for _, target, _, _ in active.values():
-                        target.unlink(missing_ok=True)
-        if self.cancel.is_set() and not self.paused:
-            self.paused = 'Cancelled. Verified jobs were retained; remaining inputs were not moved.'
+                    for job, target, _, _ in active.values():
+                        try:
+                            target.unlink(missing_ok=True)
+                        except OSError as exc:
+                            self._error(exc, job.game.source.name)
+                        job.report(self.on_item, self.interrupt_stage, detail='Batch stopped before publication.')

@@ -28,6 +28,10 @@ if [[ ${COUCHCHD_RUN_TESTS:-0} == 1 ]]; then
     # Keep test-only hooks and modules out of the frozen app.
     python -m pip install --target "$work/test-deps" 'pytest>=8,<10'
     PYTHONPATH="$work/test-deps" QT_QPA_PLATFORM=offscreen python -m pytest
+    # Exercise the real converter and controller-to-frame path on both native
+    # Linux architectures, not just a scripted progress model.
+    SteamDeck=1 SDL_AUDIODRIVER=dummy PYTHONPATH="$work/test-deps" \
+        python tests/test_queue_ui.py --native-latency --input dpad
 fi
 qt=$(python -c 'import pathlib, PySide6; print(pathlib.Path(PySide6.__file__).parent / "Qt")')
 # PySide6 Essentials 6.7.3 ships the EGLFS/KMS plugin but omits one of its

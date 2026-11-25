@@ -4,6 +4,7 @@ import os
 import tempfile
 import threading
 from collections import Counter
+from collections.abc import Callable
 from contextlib import closing, contextmanager
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from . import cloud_ingest, converter, hardware, multidisc, profiles, scanner
 from .batch import Batch, Job
 from .ledger import Ledger
 from .locking import library_lock
+from .telemetry import ItemProgress
 
 
 def _disc_output(root, game):
@@ -21,6 +23,13 @@ def _disc_output(root, game):
         if folder == root:
             break
     raise ValueError(f'No system folder for {game.source}')
+
+
+def _source_system(root, path):
+    if not path.is_relative_to(root):
+        return ''
+    parts = (root.name, *path.relative_to(root).parts[:-1])
+    return next((scanner.SYSTEMS[p.lower()] for p in reversed(parts) if p.lower() in scanner.SYSTEMS), '')
 
 
 def _artifacts(root):
@@ -68,7 +77,8 @@ class Backend:
             }
 
     def run(self, *, systems=None, sources=None, ingest=None, preset='balanced', quarantine=True,
-            immediate=False, progress=lambda message: None, cancel=None):
+            immediate=False, progress=None, cancel=None, on_item: Callable[[ItemProgress], None] | None = None):
+        report = progress or (lambda _: None)
         cancel = threading.Event() if cancel is None else cancel
         if immediate and (not quarantine or ingest):
             raise ValueError('Immediate cleanup is only available for local, verified quarantine jobs.')
@@ -87,35 +97,67 @@ class Backend:
                 destinations = {g.source: _disc_output(self.root, g) for g in games}
                 collisions = Counter(str(p).casefold() for p in destinations.values())
                 known = set(db.verified())
+                missing = None if sources is None else set(map(str, sources))
                 for game in games:
-                    if game.system not in systems or (sources is not None and str(game.source) not in sources):
+                    if missing is not None:
+                        key = str(game.source)
+                        if key not in missing:
+                            continue
+                        missing.remove(key)
+                    if game.system not in systems:
                         continue
                     output = destinations[game.source]
+                    job = Job(game, output, True)
                     if collisions[str(output).casefold()] > 1:
-                        errors.append(f'Ambiguous output for {game.source}; rename one input.')
+                        message = f'Ambiguous output for {game.source}; rename one input.'
+                        errors.append(message)
+                        job.report(on_item, 'failed', detail=message)
                     elif output not in known and output.parent / '.chd_discs' / output.name not in known:
-                        jobs.append(Job(game, output, True))
+                        jobs.append(job)
                     else:
-                        progress(f'Retained input: a verified CHD already exists for {game.source.name}')
+                        message = f'Retained input: a verified CHD already exists for {game.source.name}'
+                        report(message)
+                        job.report(on_item, 'skipped', detail=message)
                 for issue in issues:
                     message = f'{issue.category}: {issue.path.name} — {issue.reason}'
-                    progress(message)
-                    parts = (self.root.name, *issue.path.relative_to(self.root).parts[:-1])
-                    system = next((scanner.SYSTEMS[p.lower()] for p in reversed(parts) if p.lower() in scanner.SYSTEMS), None)
-                    if (issue.category == 'invalid' and (system is None or system in systems)
-                            and (sources is None or str(issue.path) in sources)):
+                    report(message)
+                    key = str(issue.path)
+                    if missing is not None:
+                        if key not in missing:
+                            continue
+                        missing.remove(key)
+                    system = _source_system(self.root, issue.path)
+                    if not system or system in systems:
+                        if issue.category == 'invalid':
+                            errors.append(message)
+                        if on_item is not None and (issue.category == 'invalid' or sources is not None):
+                            stage = 'failed' if issue.category == 'invalid' else 'skipped'
+                            on_item(ItemProgress(key, issue.path.name, system, stage, detail=message))
+                for key in sorted(missing or ()):
+                    path = Path(key)
+                    system = _source_system(self.root, path)
+                    if system in systems:
+                        message = f'Selected source no longer available: {path}'
                         errors.append(message)
+                        if on_item is not None:
+                            on_item(ItemProgress(str(path), path.name, system, 'failed', detail=message))
                 if not jobs:
                     return dict(converted=[], errors=errors, saved=0, paused='', messages=[])
-            tool = converter.tool_path()
-            scratch = Path(tmp)
-            batch = db.begin()
-            worker = Batch(self.root, scratch, db, batch, tool, guard, profiles.compression_plan(preset),
-                           quarantine, immediate, progress, cancel)
+            try:
+                tool = converter.tool_path()
+                scratch = Path(tmp)
+                plan = profiles.compression_plan(preset)
+                batch = db.begin()
+                worker = Batch(self.root, scratch, db, batch, tool, guard, plan,
+                               quarantine, immediate, progress, cancel, on_item)
+            except Exception as exc:
+                for job in jobs:
+                    job.report(on_item, 'failed', detail=f'Could not start batch: {exc}')
+                raise
             messages = []
             try:
                 if ingest:
-                    with closing(cloud_ingest.games(ingest, scratch, systems, cancel)) as stream:
+                    with closing(cloud_ingest.games(ingest, scratch, systems, cancel, on_item)) as stream:
                         while not worker.paused:
                             reason = guard.pause_reason()
                             if cancel.is_set():
@@ -126,12 +168,12 @@ class Backend:
                                 continue
                             if reason or hardware.free_bytes(self.root) < 2 * 1024**3:
                                 worker.paused = reason or 'Free at least 2 GiB on the destination before ingesting.'
-                                progress(worker.paused)
+                                report(worker.paused)
                                 break
                             entry = next(stream, None)
                             if entry is None:
                                 break
-                            game, relative = entry
+                            game, relative, key = entry
                             if relative.is_absolute() or '..' in relative.parts or relative.suffix.lower() != '.chd' or any(
                                 p.startswith('.') or p == '_couchchd_backup' for p in relative.parts
                             ):
@@ -139,13 +181,13 @@ class Backend:
                             # The scratch descriptor's parent is ephemeral; use the
                             # system resolved from the remote, not its scratch name.
                             system_dir = self.root if scanner.SYSTEMS.get(self.root.name.casefold()) == game.system else self.root / game.system
-                            worker.process([Job(game, system_dir / relative.name, False)])
+                            worker.process([Job(game, system_dir / relative.name, False, key)])
                 else:
                     worker.process(jobs)
                 if worker.outputs and not worker.paused:
                     messages = multidisc.organize(self.root, batch, db, worker.outputs)
                     for message in messages:
-                        progress(message)
+                        report(message)
             except (OSError, ValueError, RuntimeError) as exc:
                 worker._error(exc, 'Batch')
             finally:

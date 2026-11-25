@@ -289,7 +289,8 @@ def test_changed_inputs_and_precise_crash_recovery(disc, tmp_path, tool):
     assert not stale.exists() and live.exists() and unrelated.exists()
 
 
-def test_real_chdman_audio_roundtrip_if_installed(tmp_path):
+@pytest.mark.parametrize('portable', [False, True], ids=['desktop', 'portable'])
+def test_real_chdman_audio_roundtrip_if_installed(tmp_path, portable):
     try:
         tool = converter.tool_path()
     except FileNotFoundError:
@@ -298,6 +299,7 @@ def test_real_chdman_audio_roundtrip_if_installed(tmp_path):
     payload = bytes(range(256)) * 588  # 64 aligned audio frames
     aged(tmp_path/'sound.bin', payload)
     target = tmp_path/'sound.chd'
-    run(scanner.inspect(cue, 'segacd'), target, tool)
+    converter.convert(scanner.inspect(cue, 'segacd'), target, tool, threads=1,
+                      cancel=threading.Event(), fast_cd=portable)
     restored = converter.extract(target, tmp_path/'restored', tool)
     assert restored.with_suffix('.bin').read_bytes() == payload

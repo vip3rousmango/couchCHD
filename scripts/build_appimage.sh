@@ -17,7 +17,8 @@ sha256sum --check <<'HASHES'
 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  runtime
 HASHES
 chmod +x appimagetool
-install -m 644 "$root/packaging/couchchd.desktop" "$root/packaging/couchchd.svg" "$app/"
+install -m 644 "$root/packaging/couchchd.desktop" "$app/"
+install -m 644 "$root/src/couchchd/ui/assets/icon.svg" "$app/couchchd.svg"
 ln -s couchchd "$app/AppRun"
 # Generation and smoke testing require no FUSE privilege in CI.
 ./appimagetool --appimage-extract >/dev/null

@@ -29,7 +29,6 @@ def install(launcher):
 
 def test_installer_registers_stable_launcher_with_art_without_display(desktop, monkeypatch):
     vdf = pytest.importorskip('vdf')
-    pytest.importorskip('PySide6.QtSvg')
     config = Path.home() / '.local/share/Steam/userdata/123/config'
     config.mkdir(parents=True)
     monkeypatch.setenv('APPIMAGE', str(Path.home() / 'downloaded.AppImage'))
@@ -41,9 +40,14 @@ def test_installer_registers_stable_launcher_with_art_without_display(desktop, m
     assert entry['Exe'] == f'"{desktop}"'
     assert entry['StartDir'] == f'"{desktop.parent}"'
     assert entry['LaunchOptions'] == ''
-    for suffix in ('p', '_hero'):
-        art = config / 'grid' / f'{entry["appid"] & 0xffffffff}{suffix}.png'
-        assert art.read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
+    grid = config / 'grid'
+    appid = entry['appid'] & 0xffffffff
+    assert entry['icon'] == str(grid / f'{appid}_icon.png')
+    for suffix, size in (('p', (600, 900)), ('', (920, 430)), ('_hero', (1920, 620)),
+                         ('_logo', (640, 240)), ('_icon', (256, 256))):
+        art = (grid / f'{appid}{suffix}.png').read_bytes()
+        assert art[:8] == b'\x89PNG\r\n\x1a\n'
+        assert tuple(int.from_bytes(art[i:i+4], 'big') for i in (16, 20)) == size
 
 
 @pytest.mark.parametrize('layout', ['absent', 'flatpak-only', 'ambiguous'])

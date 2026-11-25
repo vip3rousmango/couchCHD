@@ -13,13 +13,14 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO
 
 from . import hardware, scanner
+from .telemetry import ItemProgress
 
 
 _REMOTE_NAME = re.compile(r'[^:/\\\x00-\x1f\x7f]+:\Z')
@@ -124,7 +125,22 @@ def stage(game: scanner.Game, scratch: Path, *, cancel: threading.Event | None =
         yield scanner.inspect(work / source.name, game.system, fresh=False)
 
 
-def _mounted(root: Path, scratch: Path, systems: set[str], cancel: threading.Event) -> Iterator[tuple[scanner.Game, Path]]:
+@contextmanager
+def _preparing(on_item, key, name, system):
+    if on_item is not None:
+        on_item(ItemProgress(key, name, system, 'queued'))
+        on_item(ItemProgress(key, name, system, 'preparing', detail='Staging a local copy'))
+    try:
+        yield
+    except (OSError, RuntimeError, ValueError) as exc:
+        if on_item is not None:
+            stage = ('cancelled' if isinstance(exc, InterruptedError) else
+                     'paused' if getattr(exc, 'errno', None) == errno.ENOSPC else 'failed')
+            on_item(ItemProgress(key, name, system, stage, detail=str(exc)))
+        raise
+
+
+def _mounted(root: Path, scratch: Path, systems: set[str], cancel: threading.Event, on_item):
     if scratch.resolve().is_relative_to(root):
         raise ValueError('Scratch must be outside the selected source directory')
     root_system = scanner.SYSTEMS.get(root.name.casefold())
@@ -150,9 +166,12 @@ def _mounted(root: Path, scratch: Path, systems: set[str], cancel: threading.Eve
             st = source.lstat()
             if not stat.S_ISREG(st.st_mode) or time.time() - st.st_mtime < 10:
                 continue
-            game = scanner.inspect(source, system, fresh=True)
-            with stage(game, scratch, cancel=cancel) as staged:
-                yield staged, output
+            with ExitStack() as disc:
+                key = str(source)
+                with _preparing(on_item, key, name, system):
+                    game = scanner.inspect(source, system, fresh=True)
+                    staged = disc.enter_context(stage(game, scratch, cancel=cancel))
+                yield staged, output, key
 
 
 def _rclone(args: list[str], cancel: threading.Event) -> bytes:
@@ -198,7 +217,7 @@ def _listing(remote: str, cancel: threading.Event) -> dict[str, list[_Object]]:
     return index
 
 
-def _cloud(remote: str, scratch: Path, systems: set[str], cancel: threading.Event) -> Iterator[tuple[scanner.Game, Path]]:
+def _cloud(remote: str, scratch: Path, systems: set[str], cancel: threading.Event, on_item):
     name, colon, prefix = remote.partition(':')
     if not colon or name + colon not in remotes():
         raise ValueError(f'Not a mounted directory or configured rclone remote: {remote}')
@@ -206,11 +225,12 @@ def _cloud(remote: str, scratch: Path, systems: set[str], cancel: threading.Even
         scanner.safe_relative_name(prefix.strip('/'))
     root_system = scanner.SYSTEMS.get((Path(prefix.rstrip('/')).name or name).casefold())
     index = _listing(remote, cancel)
+    remote_base = remote + ('' if remote.endswith((':', '/')) else '/')
 
     def pull(obj: _Object, work: Path, base: Path) -> None:
         destination = work / obj.path.relative_to(base)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        remote_path = remote + ('' if remote.endswith((':', '/')) else '/') + obj.path.as_posix()
+        remote_path = remote_base + obj.path.as_posix()
         _rclone(['copyto', '--', remote_path, str(destination)], cancel)
         if not destination.is_file() or destination.is_symlink() or destination.stat().st_size != obj.size:
             raise ValueError(f'Incomplete download: {obj.path}')
@@ -221,35 +241,40 @@ def _cloud(remote: str, scratch: Path, systems: set[str], cancel: threading.Even
         route = _destination(obj.path, root_system, systems)
         if route is None or time.time() - obj.modified < 10:
             continue
-        if len(objects) != 1:
-            raise ValueError(f'Ambiguous source name: {obj.path}')
+        key = remote_base + obj.path.as_posix()
         system, output = route
         base = obj.path.parent
-        if obj.path.suffix.lower() in ('.cue', '.gdi') and obj.size > 1024 * 1024:
-            raise ValueError(f'Descriptor exceeds 1 MiB: {obj.path}')
-        with _workspace(scratch) as work:
-            _headroom(work, obj.size)
-            pull(obj, work, base)
-            source = work / obj.path.name
-            if source.suffix.lower() in ('.cue', '.gdi'):
-                tracks = set()
-                def candidates(ref: Path) -> list[_Object]:
-                    key = (base / scanner.safe_relative_name(ref.as_posix())).as_posix().casefold()
-                    return index.get(key, [])
+        with ExitStack() as disc:
+            with _preparing(on_item, key, obj.path.name, system):
+                if len(objects) != 1:
+                    raise ValueError(f'Ambiguous source name: {obj.path}')
+                if obj.path.suffix.lower() in ('.cue', '.gdi') and obj.size > 1024 * 1024:
+                    raise ValueError(f'Descriptor exceeds 1 MiB: {obj.path}')
+                work = disc.enter_context(_workspace(scratch))
+                _headroom(work, obj.size)
+                pull(obj, work, base)
+                source = work / obj.path.name
+                if source.suffix.lower() in ('.cue', '.gdi'):
+                    tracks = set()
+                    def candidates(ref: Path) -> list[_Object]:
+                        path = (base / scanner.safe_relative_name(ref.as_posix())).as_posix().casefold()
+                        return index.get(path, [])
 
-                for ref in scanner.references(source, available=lambda p: len(candidates(p)) == 1):
-                    track, = candidates(ref)
-                    if not track.size or time.time() - track.modified < 10:
-                        raise ValueError(f'Track is empty or still transferring: {track.path}')
-                    tracks.add(track)
-                _headroom(work, sum(track.size for track in tracks))
-                for track in sorted(tracks, key=lambda item: item.path):
-                    pull(track, work, base)
-            yield scanner.inspect(source, system, fresh=False), output
+                    for ref in scanner.references(source, available=lambda p: len(candidates(p)) == 1):
+                        track, = candidates(ref)
+                        if not track.size or time.time() - track.modified < 10:
+                            raise ValueError(f'Track is empty or still transferring: {track.path}')
+                        tracks.add(track)
+                    _headroom(work, sum(track.size for track in tracks))
+                    for track in sorted(tracks, key=lambda item: item.path):
+                        pull(track, work, base)
+                staged = scanner.inspect(source, system, fresh=False)
+            yield staged, output, key
 
 
-def games(remote: str, scratch: Path, systems: set[str], cancel: threading.Event) -> Iterator[tuple[scanner.Game, Path]]:
-    """Yield a validated staged game and its library-relative .chd destination.
+def games(remote: str, scratch: Path, systems: set[str], cancel: threading.Event,
+          on_item=None) -> Iterator[tuple[scanner.Game, Path, str]]:
+    """Yield a staged game, its library-relative .chd destination and original source key.
 
     Consume the game before advancing the iterator. Close the iterator on early
     exit to release its current disc's scratch space immediately.
@@ -261,6 +286,6 @@ def games(remote: str, scratch: Path, systems: set[str], cancel: threading.Event
         raise ValueError('Choose a mounted directory or a configured rclone remote')
     mount = Path(remote).expanduser()
     if mount.is_dir():
-        yield from _mounted(mount.resolve(), scratch, systems, cancel)
+        yield from _mounted(mount.resolve(), scratch, systems, cancel, on_item)
     else:
-        yield from _cloud(remote, scratch, systems, cancel)
+        yield from _cloud(remote, scratch, systems, cancel, on_item)

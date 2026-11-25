@@ -7,7 +7,8 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
-from couchchd.recalbox_menu import register
+from couchchd import recalbox_menu
+from couchchd.recalbox_menu import refresh_artwork, register
 
 
 pytestmark = pytest.mark.skipif(os.name != 'posix', reason='Recalbox installer targets Linux')
@@ -24,6 +25,8 @@ def test_register_port_and_run_without_emulator_flags(tmp_path):
     roms = share / 'roms' / desc.get('path').removeprefix('%ROOT%/')
     marker = roms / ET.parse(roms / 'gamelist.xml').findtext('game/path')
     assert marker.is_file() and not marker.stat().st_mode & 0o111
+    cover = roms / ET.parse(roms / 'gamelist.xml').findtext('game/image')
+    assert cover.read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
     launcher = share / 'system/couchchd/run-couchchd'
     launcher.parent.mkdir()
     launcher.write_text('#!/bin/sh\nprintf "started:%s\\n" "$#"\n')
@@ -94,3 +97,36 @@ def test_refuse_linked_destinations(tmp_path, relative):
     with pytest.raises(ValueError):
         register(share)
     assert link.is_symlink() and not list(other.iterdir())
+
+
+def test_migrate_preview4_gamelist_only_after_frontend_exit(tmp_path, monkeypatch):
+    register(tmp_path)
+    roms = tmp_path / 'roms/ports/couchchd'
+    cover = roms / 'media/CouchCHD.png'
+    gamelist = roms / 'gamelist.xml'
+    old = b'<gameList><game><path>./CouchCHD.game</path><name>CouchCHD</name></game></gameList>\n'
+    gamelist.write_bytes(old)
+    cover.unlink()
+    monkeypatch.setattr(recalbox_menu, '_frontend_stopped', lambda: False)
+    assert 'stop EmulationStation' in refresh_artwork(tmp_path)
+    assert gamelist.read_bytes() == old and not cover.exists()
+    monkeypatch.setattr(recalbox_menu, '_frontend_stopped', lambda: True)
+    assert 'installed' in refresh_artwork(tmp_path)
+    assert roms / ET.parse(gamelist).findtext('game/image') == cover
+    cover.write_bytes(b'custom replacement')
+    refresh_artwork(tmp_path)
+    assert cover.read_bytes() == b'custom replacement'
+    customized = old.replace(b'</game>', b'<playcount>7</playcount></game>')
+    gamelist.write_bytes(customized)
+    cover.unlink()
+    assert 'customized' in refresh_artwork(tmp_path)
+    assert gamelist.read_bytes() == customized and not cover.exists()
+    gamelist.write_bytes(old)
+    (roms / 'gamelist.zip').write_bytes(b'frontend archive')
+    assert 'archived' in refresh_artwork(tmp_path)
+    assert gamelist.read_bytes() == old and not cover.exists()
+
+
+def test_refresh_never_creates_missing_port(tmp_path):
+    assert 'No registered' in refresh_artwork(tmp_path)
+    assert not list(tmp_path.iterdir())

@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime
 import hashlib
 from pathlib import Path
-import re
 import threading
 
-from PySide6.QtCore import QObject, Property, QDir, QSettings, QStandardPaths, Signal, Slot
+from PySide6.QtCore import (QAbstractListModel, QModelIndex, QObject, Property, QDir,
+                            QSettings, QStandardPaths, Qt, Signal, Slot)
 
 from ..app import Backend
 from .. import cloud_ingest, profiles, updater
-from . import steam
+from ..telemetry import ItemProgress
+from . import launcher_art, steam
 
 SYSTEMS = {'psx': 'PlayStation', 'segacd': 'Sega CD', 'saturn': 'Sega Saturn', 'dreamcast': 'Dreamcast', 'ps2': 'PlayStation 2', 'psp': 'PSP'}
 PRESETS = {'silent': 'Handheld Silent', 'balanced': 'Balanced', 'docked': 'Docked Max'}
@@ -64,14 +66,126 @@ POLICIES = {
 }
 
 
+class QueueModel(QAbstractListModel):
+    """One row per source, owned exclusively by the GUI thread."""
+    statsChanged = Signal()
+    activeChanged = Signal()
+    active_stages = frozenset(('preparing', 'compressing', 'verifying', 'publishing'))
+    _fields = ('name', 'system', 'stage', 'percent', 'mib_s', 'cpu_percent', 'detail')
+    _first = int(Qt.ItemDataRole.UserRole) + 1
+    _roles = dict(enumerate((b'discName', b'systemName', b'phase', b'phasePercent',
+                             b'inputSpeed', b'deviceCpu', b'itemDetail'), _first))
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._items: list[ItemProgress] = []
+        self._by_key: dict[str, int] = {}
+        self._active: set[int] = set()
+        self._done = 0
+        self._first_active = -1
+
+    def roleNames(self):
+        return self._roles
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._items)
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or not 0 <= index.row() < len(self._items):
+            return None
+        item = self._items[index.row()]
+        if role == Qt.ItemDataRole.DisplayRole:
+            return item.name
+        if role not in self._roles:
+            return None
+        field = self._fields[role - self._first]
+        value = getattr(item, field)
+        if field == 'system':
+            return SYSTEMS.get(value, value)
+        # QML numeric properties can't distinguish null from measured zero.
+        return -1.0 if value is None else value
+
+    @Property(int, notify=statsChanged)
+    def total(self): return len(self._items)
+
+    @Property(int, notify=statsChanged)
+    def verified(self): return self._done
+
+    @Property(int, notify=statsChanged)
+    def activeCount(self): return len(self._active)
+
+    @Property(int, notify=activeChanged)
+    def activeIndex(self): return self._first_active
+
+    def reset(self, items=()):
+        self.beginResetModel()
+        self._items = list(items)
+        self._by_key = {item.key: i for i, item in enumerate(self._items)}
+        self._active.clear()
+        self._first_active = -1
+        self._done = 0
+        self.endResetModel()
+        self.statsChanged.emit()
+        self.activeChanged.emit()
+
+    def item(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    @Slot(object)
+    def update_item(self, item):
+        index = self._by_key.get(item.key)
+        if index is None:
+            index = len(self._items)
+            self.beginInsertRows(QModelIndex(), index, index)
+            self._by_key[item.key] = index
+            self._items.append(item)
+            self.endInsertRows()
+            previous = None
+        else:
+            prior = self._items[index]
+            roles = [self._first + i for i, field in enumerate(self._fields)
+                     if getattr(prior, field) != getattr(item, field)]
+            if not roles:
+                return
+            self._items[index] = item
+            cell = self.index(index, 0)
+            self.dataChanged.emit(cell, cell, roles)
+            previous = prior.stage
+        if previous == item.stage:
+            return
+        was_active = previous in self.active_stages
+        active = item.stage in self.active_stages
+        if was_active != active:
+            if active:
+                self._active.add(index)
+            else:
+                self._active.discard(index)
+            first = min(self._active, default=-1)
+            if self._first_active != first:
+                self._first_active = first
+                self.activeChanged.emit()
+        self._done += (item.stage == 'done') - (previous == 'done')
+        if previous is None or was_active != active or 'done' in (previous, item.stage):
+            self.statsChanged.emit()
+
+    def finish_pending(self, stage, detail):
+        for item in self._items:
+            if item.stage == 'queued' or item.stage in self.active_stages:
+                self.update_item(replace(item, stage=stage, detail=detail, percent=None,
+                                         mib_s=None, cpu_percent=None))
+
+
 class Bridge(QObject):
     changed = Signal()
     statusChanged = Signal()
+    operationChanged = Signal()
     sceneChanged = Signal(bool)  # reset selection on navigation, not toggles
     quitRequested = Signal()
     feedback = Signal(str, bool, bool)
     _finished = Signal(object, object)
     _progress = Signal(str)
+    _item = Signal(object)
+    queueChanged = Signal()
 
     def __init__(self, root: Path | None):
         super().__init__()
@@ -92,7 +206,10 @@ class Bridge(QObject):
         self.history = []
         self.omitted = set()
         self.saved = None
-        self.live_saved = 0
+        self._queue = QueueModel(self)
+        self._queue_visible = False
+        self._queue_cloud = False
+        self._queue_result = ''
         self.tab = 0
         self.filter = 'Queue'
         self.ingest = ''
@@ -113,9 +230,35 @@ class Bridge(QObject):
         self._subtitle = ''
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='library')
         self._cancel = threading.Event()
+        self._cancel_requested = False
         self._on_success = None
-        self._finished.connect(self._complete)
+        self._finished.connect(self._complete, Qt.ConnectionType.QueuedConnection)
         self._progress.connect(self._report)
+        self._item.connect(self._queue.update_item, Qt.ConnectionType.QueuedConnection)
+
+    @Property(QObject, constant=True)
+    def queueModel(self): return self._queue
+
+    @Property(bool, notify=queueChanged)
+    def queueVisible(self): return self._queue_visible
+
+    @Property(str, notify=queueChanged)
+    def queueTitle(self): return 'Cloud ingest queue' if self._queue_cloud else 'Compression queue'
+
+    @Property(str, notify=queueChanged)
+    def queueResult(self): return self._queue_result
+
+    @Property(bool, notify=operationChanged)
+    def queueCancelling(self): return self._busy == 'Compressing discs' and self._cancel_requested
+
+    @Slot(int)
+    def inspectQueueItem(self, index):
+        if not self._queue_visible or self._modal:
+            return
+        item = self._queue.item(index)
+        if item is not None:
+            body = '\n'.join(filter(None, (item.key, item.detail)))
+            self._show('item', item.name, body, [row('back', 'Return to queue')])
 
     @Property('QVariantList', notify=changed)
     def rows(self): return self._rows
@@ -144,19 +287,17 @@ class Bridge(QObject):
     @Property(str, notify=statusChanged)
     def status(self): return self._status
 
-    @Property(bool, notify=statusChanged)
+    @Property(bool, notify=operationChanged)
     def busy(self): return bool(self._busy)
 
-    @Property(str, notify=statusChanged)
+    @Property(str, notify=operationChanged)
     def operation(self): return self._busy
 
     @Property(str, notify=changed)
     def space(self): return size(self.snap['free']) if self.snap is not None else '—'
 
-    @Property(str, notify=statusChanged)
-    def savings(self):
-        if self._busy == 'Compressing discs': return size(self.live_saved)
-        return size(self.saved) if self.saved is not None else '—'
+    @Property(str, notify=changed)
+    def savings(self): return size(self.saved) if self.saved is not None else '—'
 
     @Property('QStringList', constant=True)
     def sections(self): return TITLES
@@ -175,6 +316,8 @@ class Bridge(QObject):
                 self._report('Choose the folder that contains your system folders.')
                 self._draw(True)
         self._work('Detecting libraries', _discover, ready)
+        if launcher := launcher_art.managed_launcher():
+            self._pool.submit(launcher_art.refresh, launcher)
 
     def _refresh_after_commit(self, show_result):
         # A disappearing SD card may break the subsequent scan, but does not
@@ -199,6 +342,7 @@ class Bridge(QObject):
             return
         self._busy = title
         self._on_success = done
+        self.operationChanged.emit()
         self._report(title + '…')
         future = self._pool.submit(fn)
         def finish(f):
@@ -214,10 +358,15 @@ class Bridge(QObject):
     def _complete(self, result, error):
         done = self._on_success
         self._on_success = None
+        batch_failed = error is not None and self._busy == 'Compressing discs'
         self._busy = ''
-        self.statusChanged.emit()
+        self.operationChanged.emit()
         try:
             if error is not None:
+                if batch_failed:
+                    self._queue_result = 'Batch stopped'
+                    self._queue.finish_pending('failed', str(error))
+                    self.queueChanged.emit()
                 self._report(str(error))
                 self._draw(False)
                 self._notice('Operation stopped', str(error), alert=True)
@@ -228,11 +377,6 @@ class Bridge(QObject):
 
     @Slot(str)
     def _report(self, text):
-        if self._busy == 'Compressing discs' and text.startswith('Verified: '):
-            match = re.search(r' \(compression delta (-?\d+) bytes\)$', text)
-            if match:
-                self.live_saved += int(match[1])
-                text = text[:match.start()]
         self._status = text
         self.statusChanged.emit()
 
@@ -261,6 +405,10 @@ class Bridge(QObject):
             self.prefs.setValue('library', str(self.root))
             self.saved = int(self.prefs.value(self._saved_key())) if self.prefs.contains(self._saved_key()) else None
             self.omitted.clear()
+            self._queue_result = ''
+            self._queue_visible = False
+            self._queue.reset()
+            self.queueChanged.emit()
             self._install_scan(result)
             self._report('Scan complete.')
             self._draw(True)
@@ -349,6 +497,8 @@ class Bridge(QObject):
                     row('purge', 'Purge verified backups', 'Permanently remove eligible quarantined originals.', 'Review')]
             for record in self.history:
                 rows.append(row('history', f"Batch {record['id']}", f"{_when(record['started'])}  ·  {record['operations']} operations", record['status'], record['id']))
+        if self._queue_result and self.tab == (3 if self._queue_cloud else 0):
+            rows.insert(0, row('lastqueue', 'Review last queue', self._queue_result, 'Open'))
         self._rows, self._primary = rows, primary
         self.changed.emit()
         self.sceneChanged.emit(reset)
@@ -376,7 +526,7 @@ class Bridge(QObject):
 
     @Slot(int)
     def switchTab(self, index):
-        if self._modal or self._busy: return
+        if self._modal or self._busy or self._queue_visible: return
         self.tab = index % len(TITLES)
         self._draw(True)
         if self.tab == 3 and self.remote_names is None: self._remotes()
@@ -390,7 +540,7 @@ class Bridge(QObject):
 
     @Slot()
     def settings(self):
-        if self._busy: return
+        if self._busy or self._queue_visible: return
         if self._modal:
             if self._modal['kind'] == 'settings': self._hide()
             return
@@ -403,6 +553,8 @@ class Bridge(QObject):
             row('sound', 'Interface sounds', 'Quiet navigation ticks and batch feedback.', 'On' if self.sound else 'Off'),
             row('rumble', 'Controller vibration', 'Pulse on completion or when attention is needed.', 'On' if self.rumble else 'Off'),
             row('update', 'Update CouchCHD', 'Check the public release and install it for your next launch.'),
+            *([row('art', 'Refresh launcher artwork', 'Fill missing artwork on existing entries; keep custom images.')]
+              if launcher_art.managed_launcher() else []),
             row('steam', 'Add to Steam', 'Register the launcher, grid artwork, and gamepad layout.'), row('exit', 'Exit CouchCHD')], reset=reset)
 
     def _pick(self, target, *, returning=False):
@@ -458,20 +610,33 @@ class Bridge(QObject):
     def _run(self, cloud, sources):
         self._hide()
         self._cancel = threading.Event()
-        self.live_saved = 0
+        self._cancel_requested = False
+        self._queue_cloud = cloud
+        self._queue_result = ''
+        self._queue.reset(ItemProgress(str(g['path']), Path(g['path']).name, g['system'], 'queued')
+                          for g in (self.snap or {}).get('games', ()) if not cloud and str(g['path']) in sources)
+        self._queue_visible = True
+        self.queueChanged.emit()
         options = dict(systems=set(self.enabled_systems), sources=sources, ingest=self.ingest if cloud else None,
                        preset=self.preset, quarantine=cloud or self.policy != 'keep',
-                       immediate=not cloud and self.policy == 'immediate', progress=self._progress.emit, cancel=self._cancel)
+                       immediate=not cloud and self.policy == 'immediate', progress=self._progress.emit,
+                       on_item=self._item.emit, cancel=self._cancel)
         def finished(result):
             self.saved = int(result['saved'])
             self.prefs.setValue(self._saved_key(), str(self.saved))
             errors = list(map(str, result['errors']))
             converted = list(map(str, result['converted']))
             paused = result.get('paused')
-            cancelled = self._cancel.is_set()
-            title = 'Batch paused' if paused else 'Batch cancelled' if cancelled else 'Batch needs attention' if errors else 'Batch complete'
+            cancelled = self._cancel_requested
+            title = 'Batch cancelled' if cancelled else 'Batch paused' if paused else 'Batch needs attention' if errors else 'Batch complete'
+            self._queue_result = title
+            self._queue.finish_pending('cancelled' if cancelled else 'paused' if paused else 'skipped',
+                                       paused or ('Cancelled before completion.' if cancelled else 'Not processed in this batch.'))
+            self.queueChanged.emit()
             text = f'{len(converted)} converted. Compression difference: {size(self.saved)}.'
-            if paused: text += f'\n{paused}\nResolve the condition, then start another batch to continue.'
+            if paused:
+                text += f'\n{paused}'
+                if not cancelled: text += '\nResolve the condition, then start another batch to continue.'
             if errors: text += f'\n{len(errors)} errors. See the messages below.'
             def refreshed(warning):
                 self._report(text)
@@ -503,7 +668,7 @@ class Bridge(QObject):
 
     @Slot()
     def primary(self):
-        if self._modal or self._busy: return
+        if self._modal or self._busy or self._queue_visible: return
         if self.tab == 4: self._management('purge')
         elif self.tab == 3: self._run_prompt(True)
         elif self._selected(): self._run_prompt()
@@ -512,9 +677,12 @@ class Bridge(QObject):
     @Slot()
     def back(self):
         kind = self._modal['kind'] if self._modal else ''
+        if kind == 'item': return self._hide()
         if self._busy == 'Compressing discs' and kind != 'confirm':
             def cancel():
+                self._cancel_requested = True
                 self._cancel.set()
+                self.operationChanged.emit()
                 self._hide()
                 self._report('Cancelling safely. Waiting for active operations…')
             if not self._cancel.is_set(): self._ask('Cancel this batch?', 'Completed conversions remain in History. Incomplete discs will not be committed.', 'Cancel batch', cancel)
@@ -527,6 +695,11 @@ class Bridge(QObject):
             return self._pick(self._target, returning=True)
         if kind == 'locations' and self._return_to == 'settings': return self._settings()
         if kind: return self._hide()
+        if self._queue_visible:
+            self._queue_visible = False
+            self.queueChanged.emit()
+            self._draw(True)
+            return
         if self.tab != 0: return self.switchTab(0)
         self.exitPrompt()
 
@@ -540,11 +713,14 @@ class Bridge(QObject):
 
     @Slot(int, bool)
     def activate(self, index, inspect=False):
+        if self._queue_visible and not self._modal: return
         items = self._dialog_rows if self._modal else self._rows
         if not 0 <= index < len(items): return
         item = items[index]
         key, arg = item['key'], item['arg']
-        if self._busy and not (self._busy == 'Compressing discs' and key in ('accept', 'back')): return
+        if self._busy and not (self._modal and ((self._busy == 'Compressing discs' and
+                               self._modal['kind'] == 'confirm' and key in ('accept', 'back'))
+                               or (self._modal['kind'] == 'item' and key == 'back'))): return
         if key == 'accept':
             action = self._confirm
             if action is not None:
@@ -553,6 +729,10 @@ class Bridge(QObject):
             return
         if key == 'back': return self.back()
         if key == 'note': return
+        if key == 'lastqueue':
+            self._queue_visible = True
+            self.queueChanged.emit()
+            return
         if key == 'game':
             game = next(g for g in self.snap['games'] if str(g['path']) == arg)
             if inspect:
@@ -611,6 +791,10 @@ class Bridge(QObject):
                 self._report(title)
                 self._notice(title, message)
             return self._work('Updating CouchCHD', lambda: updater.update(self._progress.emit), updated)
+        if key == 'art' and (launcher := launcher_art.managed_launcher()):
+            self._hide()
+            return self._work('Checking launcher artwork', lambda: launcher_art.refresh(launcher),
+                              lambda msg: self._notice('Launcher artwork', msg))
         if key == 'steam':
             self._hide()
             return self._work('Registering with Steam', steam.register, lambda msg: self._notice('Steam shortcut ready', msg))

@@ -1,20 +1,20 @@
 """Register a native Recalbox port without changing the read-only system list."""
 import os
 import shlex
-import stat
-import tempfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.parsers import expat
 from xml.sax.saxutils import quoteattr
 
-from .ledger import install_new
+from .menu_entry import _ASSETS, read_regular, store_entry
 
 
 _UUID = '27790d47-96e4-43be-a995-8c2ca3e6ea0d'
 _ROM_PATH = '%ROOT%/ports/couchchd'
 _MARKER = b'CouchCHD managed Recalbox menu entry\n'
-_GAMELIST = b'<gameList><game><path>./CouchCHD.game</path><name>CouchCHD</name></game></gameList>\n'
+_PREVIEW4_GAMELIST = b'<gameList><game><path>./CouchCHD.game</path><name>CouchCHD</name></game></gameList>\n'
+_IMAGE = 'CouchCHD.png'
+_GAMELIST = _PREVIEW4_GAMELIST.replace(b'</game>', b'<image>./media/CouchCHD.png</image></game>')
 
 
 def _entry(launcher: Path) -> bytes:
@@ -76,40 +76,78 @@ def _merge(data: bytes | None, path: Path, entry: bytes) -> bytes:
     raise ValueError(f'Cannot safely extend the encoding of {path}; use UTF-8')
 
 
-def _read_regular(path: Path) -> bytes | None:
+def _frontend_stopped() -> bool:
+    """Recalbox runs emulationstation-starter under this pidfile; fail closed."""
     try:
-        mode = path.lstat().st_mode
-    except FileNotFoundError:
-        return None
-    if not stat.S_ISREG(mode):
-        raise ValueError(f'Will not follow or replace {path}')
-    return path.read_bytes()
+        pidfile = Path('/var/run/emulationstation.pid')
+        if pidfile.exists():
+            pid = int(pidfile.read_text().strip())
+            if pid <= 0:
+                return False
+            try:
+                os.kill(pid, 0)
+                return False
+            except ProcessLookupError:
+                pass
+        # A manually launched frontend need not have a pidfile. Linux comm
+        # is truncated to 15 bytes, including for emulationstation-starter.
+        for p in Path('/proc').iterdir():
+            if not p.name.isdecimal():
+                continue
+            try:
+                if (p / 'comm').read_bytes().strip().startswith(b'emulationstatio'):
+                    return False
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+        return True
+    except (ValueError, OSError):
+        return False
 
 
-def _store(path: Path, data: bytes, old: bytes | None) -> None:
-    if data == old:
-        return
-    fd, name = tempfile.mkstemp(prefix='.couchchd-', dir=path.parent)
-    tmp = Path(name)
-    try:
-        with os.fdopen(fd, 'wb') as f:
-            f.write(data)
-            f.flush()
-            if old is not None:
-                info, staged = path.lstat(), os.fstat(f.fileno())
-                if (info.st_uid, info.st_gid) != (staged.st_uid, staged.st_gid):
-                    os.fchown(f.fileno(), info.st_uid, info.st_gid)
-                if stat.S_IMODE(info.st_mode) != stat.S_IMODE(staged.st_mode):
-                    os.fchmod(f.fileno(), stat.S_IMODE(info.st_mode))
-            os.fsync(f.fileno())
-        if old is None:
-            install_new(tmp, path)
-        else:
-            if _read_regular(path) != old:
-                raise ValueError(f'{path} changed during setup; rerun the installer')
-            os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
+def _cover(roms: Path) -> None:
+    media = roms / 'media'
+    if media.is_symlink():
+        raise ValueError(f'Will not install through symlink {media}')
+    media.mkdir(exist_ok=True)
+    dest = media / _IMAGE
+    if dest.is_symlink() or (dest.exists() and not dest.is_file()):
+        raise ValueError(f'Leaving existing media path unchanged: {dest}')
+    if not dest.exists():
+        store_entry(dest, (_ASSETS / 'grid.png').read_bytes(), None)
+
+
+def _artwork(roms: Path, games: bytes | None) -> str:
+    gamelist = roms / 'gamelist.xml'
+    if os.path.lexists(roms / 'gamelist.zip'):
+        return 'Leaving the archived Recalbox gamelist and its artwork unchanged.'
+    # Do not hide a recoverable library by creating fresh XML in front of it.
+    if (os.path.lexists(roms / 'gamelist.intermediate-tmp') or
+            (games is None and os.path.lexists(roms / 'gamelist.backup'))):
+        return 'Leaving Recalbox gamelist recovery files unchanged.'
+    if games not in (None, _PREVIEW4_GAMELIST, _GAMELIST):
+        return 'Leaving the customized Recalbox gamelist and its artwork unchanged.'
+    if games == _PREVIEW4_GAMELIST and not _frontend_stopped():
+        return ('Recalbox cover not attached: quit CouchCHD, stop EmulationStation, '
+                'then rerun the installer before starting EmulationStation again.')
+    _cover(roms)
+    store_entry(gamelist, _GAMELIST, games)
+    return 'Recalbox Ports cover is installed.'
+
+
+def refresh_artwork(share: Path) -> str:
+    """Never register a new port from a running app or edit user-managed metadata."""
+    roms = share / 'roms/ports/couchchd'
+    config = share / 'system/.emulationstation/systemlist.xml'
+    if any(p.is_symlink() for p in (share, *roms.parents, *config.parents, roms)):
+        raise ValueError('Leaving redirected Recalbox paths unchanged.')
+    system = read_regular(config)
+    if (system is None or _merge(system, config, _entry(share / 'system/couchchd/run-couchchd')) != system
+            or read_regular(roms / 'CouchCHD.game') != _MARKER):
+        return 'No registered CouchCHD Recalbox port; no artwork changed.'
+    games = read_regular(roms / 'gamelist.xml')
+    if games is None:
+        return 'No managed Recalbox gamelist; no artwork changed.'
+    return _artwork(roms, games)
 
 
 def register(share: Path) -> None:
@@ -121,20 +159,22 @@ def register(share: Path) -> None:
         if folder.is_symlink():
             raise ValueError(f'Will not install through symlink {folder}')
         folder.mkdir(exist_ok=True)
-    original = _read_regular(config)
+    original = read_regular(config)
     updated = _merge(original, config, _entry(share / 'system/couchchd/run-couchchd'))
-    previous = _read_regular(marker)
+    previous = read_regular(marker)
     if previous not in (None, _MARKER):
         raise ValueError(f'Will not replace unmanaged {marker}')
-    games = _read_regular(gamelist)
+    games = read_regular(gamelist)
     if games is not None:
         tree = _xml(games, gamelist)
         if tree.tag != 'gameList' or not any(p.text in ('CouchCHD.game', './CouchCHD.game')
                                              for p in tree.findall('./game/path')):
             raise ValueError(f'Will not replace unmanaged {gamelist}')
-    _store(marker, _MARKER, previous)
-    if games is None:
-        _store(gamelist, _GAMELIST, None)
-    _store(config, updated, original)
+    store_entry(marker, _MARKER, previous)
+    if games is None and previous == _MARKER and not _frontend_stopped():
+        print('Missing Recalbox gamelist; not recreating it while EmulationStation may be running.')
+    else:
+        print(_artwork(roms, games))
+    store_entry(config, updated, original)
     print('When ready: START > QUIT > RESTART RECALBOX, then open Ports > CouchCHD.\n'
           'If Ports is hidden: START > SYSTEM-LISTS & GAMELISTS SETTINGS > SHOW PORTS SYSTEM.')

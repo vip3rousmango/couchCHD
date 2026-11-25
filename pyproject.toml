@@ -27,7 +27,7 @@ version = {attr = "couchchd.__version__"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-"couchchd.ui" = ["qml/*.qml", "assets/*.svg", "assets/*.vdf"]
+"couchchd.ui" = ["qml/*.qml", "assets/*.svg", "assets/*.png", "assets/*.vdf"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

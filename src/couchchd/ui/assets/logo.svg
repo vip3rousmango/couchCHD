@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="240" viewBox="0 0 640 240">
+  <title>CouchCHD — cut-disc monogram</title>
+  <!-- An outlined lockup stays legible on both the supplied hero and custom imagery. -->
+  <g stroke="#192221" stroke-linejoin="round">
+    <path d="M210 157a97 97 0 1 1 0-74l-31 13a64 64 0 1 0 0 48z" fill="#dbf483" stroke-width="6"/>
+    <path d="M166 139a49 49 0 1 1 0-38l-13 6a35 35 0 1 0 0 26z" fill="#dbf483" stroke-width="4"/>
+    <circle cx="120" cy="120" r="16" fill="#192221" stroke-width="4"/>
+    <circle cx="120" cy="120" r="11" fill="none" stroke="#dbf483" stroke-width="5"/>
+    <g fill="#f1f1e9" stroke-width="6">
+      <path d="M347 77c-13-12-30-18-48-18-40 0-70 25-70 61s30 61 70 61c18 0 35-6 48-18l-19-20c-8 8-18 12-29 12-22 0-38-14-38-35s16-35 38-35c11 0 21 4 29 12z"/>
+      <path d="M360 61h30v43h49V61h30v118h-30v-48h-49v48h-30z"/>
+      <path fill-rule="evenodd" d="M490 61h49c46 0 75 22 75 59s-29 59-75 59h-49z M521 88v64h18c28 0 43-11 43-32s-15-32-43-32z"/>
+    </g>
+  </g>
+</svg>

@@ -6,6 +6,7 @@ This exercises the stored command, not the Steam client or gamescope.
 import os
 from pathlib import Path
 import signal
+import struct
 import subprocess
 import sys
 
@@ -20,7 +21,16 @@ def main() -> None:
     (entry,) = (fields for fields in entries.values() if fields['AppName'] == 'CouchCHD')
     assert entry['Exe'] == f'"{launcher}"' and entry['StartDir'] == f'"{launcher.parent}"', entry
     assert not entry['LaunchOptions'], entry
-    env = dict(os.environ, SteamAppId=str(entry['appid'] & 0xffffffff),
+    appid = entry['appid'] & 0xffffffff
+    grid = profile / 'grid'
+    assert Path(entry['icon']) == grid / f'{appid}_icon.png'
+    for suffix, dimensions in {'': (920, 430), 'p': (600, 900), '_hero': (1920, 620),
+                               '_logo': (640, 240), '_icon': (256, 256)}.items():
+        path = grid / f'{appid}{suffix}.png'
+        with path.open('rb') as art:
+            header = art.read(24)
+        assert header[:8] == b'\x89PNG\r\n\x1a\n' and struct.unpack('>II', header[16:]) == dimensions, path
+    env = dict(os.environ, SteamAppId=str(appid),
                XDG_SESSION_TYPE='wayland', WAYLAND_DISPLAY='unavailable', QT_XCB_GL_INTEGRATION='none')
     proc = subprocess.Popen([entry['Exe'][1:-1]], cwd=entry['StartDir'][1:-1], env=env,
                             start_new_session=True)

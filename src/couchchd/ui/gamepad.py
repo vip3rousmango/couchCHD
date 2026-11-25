@@ -70,6 +70,7 @@ class InputRouter(QObject):
         super().__init__(app)
         self._app = app
         self._pad = None
+        self._instance = None
         self._family = 'Keyboard'
         self._name = 'Keyboard'
         self._held: set[str] = set()
@@ -116,6 +117,7 @@ class InputRouter(QObject):
         if self._pad is not None:
             self._pad.quit()
         self._pad = None
+        self._instance = None
         self._family = self._name = 'Keyboard'
         self._held.clear()
         self.changed.emit()
@@ -123,7 +125,7 @@ class InputRouter(QObject):
     def _poll(self):
         now = time.monotonic()
         try:
-            pg.event.get()  # drain joystick and controller events, including hotplug
+            events = pg.event.get()
             if self._pad is not None and not self._pad.attached():
                 self._detach()
             if self._pad is None and now >= self._probe_at:
@@ -132,7 +134,9 @@ class InputRouter(QObject):
                     if controller.is_controller(i):
                         self._pad = controller.Controller(i)
                         self._name = self._pad.name or 'Gamepad'
-                        self._family = family(self._name, self._pad.as_joystick().get_guid())
+                        joystick = self._pad.as_joystick()
+                        self._instance = joystick.get_instance_id()
+                        self._family = family(self._name, joystick.get_guid())
                         self.changed.emit()
                         break
             if self._pad is None:
@@ -146,7 +150,11 @@ class InputRouter(QObject):
             self._timer.stop()
             self.warning.emit(f'Controller input stopped: {exc}. Reconnect and restart CouchCHD, or use the keyboard.')
             return
-        new = down - self._held
+        # SDL retains button edges across a slow frame. Sampling only the
+        # current state loses a short D-pad or Back tap released between polls.
+        taps = {BUTTONS[e.button] for e in events if e.type == pg.CONTROLLERBUTTONDOWN
+                and e.instance_id == self._instance and e.button in BUTTONS}
+        new = (down - self._held) | taps
         self._held = down
         if not self._app.focusWindow():
             return

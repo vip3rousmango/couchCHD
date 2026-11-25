@@ -150,18 +150,41 @@ def _overheated(*, portable: bool = False) -> bool:
     return False
 
 
+def _compression_mask(allowed: set[int], threads: int) -> set[int]:
+    # Logical IDs are not necessarily adjacent SMT siblings. Leaving five of
+    # eight IDs to chdman can otherwise occupy *all four* physical Deck cores.
+    first = min(allowed)
+    reserved = {first}
+    siblings = _SYS / f'devices/system/cpu/cpu{first}/topology/thread_siblings_list'
+    for span in _text(siblings).split(','):
+        lo, _, hi = span.partition('-')
+        if lo.isdecimal() and (not hi or hi.isdecimal()):
+            reserved.update(cpu for cpu in allowed if int(lo) <= cpu <= int(hi or lo))
+    available = allowed - reserved or allowed - {first} or allowed
+    return set(sorted(available)[-threads:])
+
+
 @contextmanager
 def portable_budget(threads: int, progress, cancel):
     """Run ONLY on a dedicated batch pool thread. Children inherit its mask at fork/exec."""
     allowed = None
     mask = None
+    # Linux niceness is per thread and inherited across exec. This pool is
+    # dedicated to converters; never renice the UI, its input poller or Steam.
+    if sys.platform == 'linux' and threading.current_thread() is not threading.main_thread():
+        try:
+            tid = threading.get_native_id()
+            if os.getpriority(os.PRIO_PROCESS, tid) < 10:
+                os.setpriority(os.PRIO_PROCESS, tid, 10)
+        except OSError:
+            pass  # Affinity and thermal limits still apply.
     hot = _overheated(portable=True)
     if hot:
         threads = 1
         progress('Thermal limit: starting on one CPU at 80°C or above.')
     try:
         allowed = os.sched_getaffinity(0)
-        mask = set(sorted(allowed)[-threads:])
+        mask = _compression_mask(allowed, threads)
         if mask != allowed:
             os.sched_setaffinity(0, mask)
         threads = len(mask)

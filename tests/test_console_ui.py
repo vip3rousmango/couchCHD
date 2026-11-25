@@ -121,6 +121,10 @@ def test_single_qml_window_handles_physical_actions(tmp_path):
                 break
         assert pad.device != 'Keyboard'
         assert sdl.SDL_JoystickSetVirtualButton(stick, pg.CONTROLLER_BUTTON_RIGHTSHOULDER, 1) == 0
+        # A complete tap between UI polls must still navigate exactly once.
+        pg.event.pump()
+        assert sdl.SDL_JoystickSetVirtualButton(stick, pg.CONTROLLER_BUTTON_RIGHTSHOULDER, 0) == 0
+        pg.event.pump()
         for _ in range(100):
             QTest.qWait(20)
             if state.section == 1:

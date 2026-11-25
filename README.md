@@ -12,7 +12,7 @@ curl -f https://vip3rousmango.github.io/couchCHD/i | sh
 
 This runs code from this repository as your current user. To inspect it first, download the script to a file, read it, then run `sh install-device.sh`. Don't use `sudo` on the Deck. No build machine, clone, Python installation, or GitHub login is required on the target.
 
-The installer selects the x86-64 AppImage or aarch64 Linux tarball from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.4), verifies its SHA-256 against that release's manifest, and runs `--version` before activating it. It stops on a missing release, failed download or checksum mismatch. Both architectures require a **64-bit userspace, glibc 2.36+**, an executable data volume, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported by these binaries.
+The installer selects the x86-64 AppImage or aarch64 Linux tarball from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.5), verifies its SHA-256 against that release's manifest, and runs `--version` before activating it. It stops on a missing release, failed download or checksum mismatch. Both architectures require a **64-bit userspace, glibc 2.36+**, an executable data volume, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported by these binaries.
 
 Desktop Linux gets an Applications menu entry and launches immediately if a graphical display is available. On appliances the installer registers the launcher, tells you how to refresh the menu, and leaves the current frontend running. Setup does not convert or purge anything.
 
@@ -23,6 +23,8 @@ Desktop Linux gets an Applications menu entry and launches immediately if a grap
 **Desktop Mode:** search for **CouchCHD** in KDE's application menu. The installed x86-64 launcher uses software rendering by default to avoid OpenGL startup failures. In ES-DE, rescan the ROM directory and look under **Ports**.
 
 **Update from the couch:** after installing preview.4 or later with the public installer, open **Settings → Update CouchCHD** when idle. One press checks the project's release channel and installs a newer verified build if available. Exit and reopen CouchCHD normally to use it; the updater doesn't restart Steam, change menu entries, or touch your ROM library. If you're on preview.3 or earlier, finish or cancel your batch, exit CouchCHD, then run the short install command once to get this option. Private and source installations stay on their existing update path.
+
+On the next managed launch, CouchCHD fills missing Steam portraits, landscape tiles, heroes, logos and icons for its existing shortcut without overwriting custom art. Restart Steam if it still shows a cached image. For a preview.4 shortcut with no icon configured, fully exit Steam and use **Settings → Add to Steam** once in Desktop Mode. **Settings → Refresh launcher artwork** reports what can be refreshed without editing a running frontend.
 
 | Detected frontend | Where to launch CouchCHD |
 | --- | --- |
@@ -120,12 +122,16 @@ Treat the CPU budget and the compression speed as separate settings: using fewer
 
 Recognized Decks and Pis run **one disc at a time**, including verification. On an eight-thread Deck, Balanced and Docked allow the compressor five logical CPUs (62.5%); Silent allows four. A four-core Pi 4 allows two, or one on models with 2 GiB RAM or less or unknown memory. On these devices a detected temperature of 80°C or higher reduces the active conversion to one CPU for the rest of the disc. Limits rely on Linux CPU affinity and visible sensors; they are not a thermal guarantee.
 
+On Linux, portable conversion workers run at lower scheduling priority. When CPU topology is available, the compressor leaves one physical core and its SMT siblings available to the frontend if the process has access to another core. This leaves room for the controller and compositor; it does not set a frame rate or restrict other applications.
+
+During a batch, use the D-pad to browse individual discs. The percentage belongs to the current stage (compression or verification), not the entire batch. MiB/s is estimated logical disc data processed, not SD-card write speed. CPU is the converter's measured share of the device's available CPUs, not total system load. A blank metric means no measurement yet. Checking a row does not pause the converter.
+
 If the device feels too hot during a batch, press **B → Cancel batch** and wait for confirmation. Completed verified discs stay in History. The interrupted disc restarts from its original on the next batch; it does not resume from a partial CHD. Let the device cool before restarting or updating.
 
 ## What verification covers
 
 - CUE/GDI tracks must resolve to nonempty regular files; ambiguous case matches, unsupported layouts, truncated sectors, and active transfers are not eligible. Original descriptors are never edited in place. ISO images require a recognized volume header. See [the system and format table](SPEC.md).
-- CD retains `createcd` defaults. DVD-mode ISOs (PSP and PS2 DVD) use `createdvd -hs 2048 -c zlib`: one lossless codec instead of trying several codecs for each sector. The tradeoff is potentially larger files. Verification still requires both raw and overall SHA-1 and matching disc geometry. The RetroAchievements indicator describes this format policy, **not** a network lookup or proof that a game is in the RetroAchievements database.
+- CD always retains the default `createcd` hunk size. Portable devices try CD Deflate and CD FLAC, skipping LZMA; other systems keep the default codec search. DVD-mode ISOs (PSP and PS2 DVD) use `createdvd -hs 2048 -c zlib`. Trying fewer lossless codecs can finish sooner at the cost of a larger file on some discs. Both raw and overall SHA-1 and matching disc geometry are still required. The RetroAchievements indicator describes this format policy, **not** a network lookup or proof that a game is in the RetroAchievements database.
 - Originals move to `_couchchd_backup/` only after verified publication. Shared tracks stay in place while a live descriptor might still need them. Relative `.m3u` entries point to `.chd_discs/`; single discs keep their normal CHD names. Stop Recalbox EmulationStation before metadata changes; re-run Steam ROM Manager after paths change.
 - The SQLite ledger (`couchchd_history.db`) tracks filesystem operations. Undo restores originals without overwriting conflicts and retains generated CHDs under `_couchchd_backup/.undo/`. A changed file is grounds to stop, not permission to overwrite it.
 - Quarantine on the same volume does **not** reclaim space. After testing the CHDs in your emulator and making an independent backup, `couchchd --root /games/roms --purge --yes` permanently deletes authenticated quarantined files. A purged batch cannot be undone. BIN/CUE extraction creates a playable disc representation, not an exact reconstruction of original descriptor text, filenames, or layout.

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>CouchCHD — optical disc</title>
+  <circle cx="128" cy="128" r="122" fill="#192221" stroke="#85928a" stroke-width="3"/>
+  <g fill="none" stroke="#dbf483">
+    <path d="M218 166a98 98 0 1 1 0-76" stroke-width="25"/>
+    <path d="M188 153a65 65 0 1 1 0-50" stroke-width="11"/>
+    <circle cx="128" cy="128" r="17" stroke-width="8"/>
+  </g>
+</svg>

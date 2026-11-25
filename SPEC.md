@@ -45,6 +45,8 @@ CouchCHD detects target systems automatically via folder aliases (supporting Emu
 
 \* \*\*RetroAchievements Hash Guarantee:\*\* Hunk sizes are strictly locked to Redump/RetroAchievements standards (\`createcd\` default; \`createdvd \-hs 2048\`). Every verified \`.chd\` displays a \*\*"RetroAchievements Hash Safe"\*\* indicator.
 
+Here **Default** means standard CD hunk geometry. On portable devices, `createcd` may use the lossless `cdzl,cdfl` codec pair to avoid LZMA trial compression. This does not relax checksum or track-layout verification.
+
 \---
 
 \#\# 4\. Multi-Disc Grouping & \`.m3u\` Automation  

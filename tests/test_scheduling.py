@@ -77,10 +77,13 @@ def test_portable_queue_publishes_one_disc_before_preparing_the_next(tmp_path, m
         worker_masks.cpus = set(cpus)
     monkeypatch.setattr(os, 'sched_getaffinity', affinity, raising=False)
     monkeypatch.setattr(os, 'sched_setaffinity', pin, raising=False)
-    monkeypatch.setattr(hardware, '_SYS', root / 'no-sensors')
+    topology = root / 'devices/system/cpu/cpu2/topology'
+    topology.mkdir(parents=True)
+    (topology / 'thread_siblings_list').write_text('2,16\n')
+    monkeypatch.setattr(hardware, '_SYS', root)
     monkeypatch.setattr(hardware, '_power', lambda: (False, None))
     monkeypatch.setattr(hardware, 'free_bytes', lambda path: 16 * 1024**3)
-    messages = []
+    messages, items = [], []
     jobs = []
     for n in range(5):
         source = root / f'{n}.iso'
@@ -88,19 +91,24 @@ def test_portable_queue_publishes_one_disc_before_preparing_the_next(tmp_path, m
         jobs.append(Job(scanner.inspect(source, 'psp', fresh=False), source.with_suffix('.chd'), True))
     def native_create(game, target, tool, *, threads, **kwargs):
         assert len(affinity(0)) == threads == 5
-        assert affinity(0) <= allowed
+        assert affinity(0) <= allowed - {2, 16}  # one complete core free for the frontend
+        assert kwargs['device_cpus'] == len(allowed)  # before the narrower worker affinity
         target.write_bytes(b'verified output')
     monkeypatch.setattr(converter, 'convert', native_create)
     with Ledger(root) as db:
         batch = db.begin()
         worker = Batch(root, root, db, batch, None, hardware.Watchdog(), profiles.CompressionPlan(5, True),
-                       False, False, messages.append, threading.Event())
+                       False, False, messages.append, threading.Event(), items.append)
         worker.process(jobs)
         db.finish(batch)
         assert not worker.errors
         assert worker.outputs == [job.output for job in jobs]
     events = [m.split(':', 1)[0] for m in messages if m.startswith(('Preparing:', 'Verified:'))]
     assert events == ['Preparing', 'Verified'] * len(jobs)
+    assert [e.key for e in items[:len(jobs)]] == [str(j.game.source) for j in jobs]
+    assert all(e.stage == 'queued' for e in items[:len(jobs)])
+    for j in jobs:
+        assert [e.stage for e in items if e.key == str(j.game.source)] == ['queued', 'preparing', 'publishing', 'done']
     assert affinity(0) == allowed
 
 
@@ -142,6 +150,7 @@ helpers = [threading.Thread(target=release.wait, daemon=True) for _ in range(3)]
 for helper in helpers:
     helper.start()
 tids = [os.getpid()] + [t.native_id for t in helpers]
+nice = [os.getpriority(os.PRIO_PROCESS, tid) for tid in tids]
 def masks():
     return [sorted(os.sched_getaffinity(tid)) for tid in tids]
 initial = masks()
@@ -149,10 +158,11 @@ Path('class/hwmon/hwmon1/temp1_input').write_text('80000')
 end = time.monotonic() + 10
 while any(len(m) != 1 for m in masks()) and time.monotonic() < end:
     time.sleep(.02)
-Path('observed').write_text(json.dumps([initial, masks()]))
+Path('observed').write_text(json.dumps([initial, masks(), nice]))
 release.set()
 ''')
     cancel, messages = threading.Event(), []
+    ui_nice = os.getpriority(os.PRIO_PROCESS, 0)
     def run_disc():
         with hardware.portable_budget(2, messages.append, cancel) as threads:
             assert threads == 2
@@ -161,7 +171,9 @@ release.set()
         assert os.sched_getaffinity(0) == allowed  # reusable executor thread restored
     with ThreadPoolExecutor(max_workers=1) as pool:
         pool.submit(run_disc).result(timeout=20)
-    before, after = json.loads((tmp_path / 'observed').read_text())
+    before, after, priorities = json.loads((tmp_path / 'observed').read_text())
+    assert min(priorities) >= 10
+    assert os.getpriority(os.PRIO_PROCESS, 0) == ui_nice
     assert all(len(mask) == 2 and set(mask) <= allowed for mask in before)
     assert all(mask == after[0] and len(mask) == 1 for mask in after)
     assert os.sched_getaffinity(0) == allowed

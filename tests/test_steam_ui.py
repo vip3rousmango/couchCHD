@@ -10,20 +10,22 @@ from couchchd.ui.steam import _shortcut
 
 def test_new_shortcut_has_persistent_executable_and_unsigned_art_id(tmp_path):
     launcher = tmp_path / 'My Programs' / 'CouchCHD.AppImage'
-    blob, appid = _shortcut(None, launcher)
+    grid = tmp_path / 'grid'
+    blob, appid, _ = _shortcut(None, launcher, grid)
     entry = vdf.binary_loads(blob)['shortcuts']['0']
     assert entry['Exe'] == f'"{launcher}"'
     assert entry['StartDir'] == f'"{launcher.parent}"'
     assert entry['AppName'] == 'CouchCHD'
     assert entry['appid'] & 0xffffffff == appid
-    assert _shortcut(blob, launcher) == (blob, appid)
+    assert entry['icon'] == str(grid / f'{appid}_icon.png')
+    assert _shortcut(blob, launcher, grid) == (blob, appid, os.fsencode(entry['icon']))
 
 
 def test_existing_shortcut_bytes_are_never_recoded(tmp_path):
     # Legacy installations can have local-codepage names. Decoding and then
     # serializing the existing tree would corrupt this name with U+FFFD.
     old = vdf.binary_dumps({'shortcuts': {'4': {'AppName': 'PLACE', 'tags': {'0': 'RPG'}}}}).replace(b'PLACE', b'T\xffST!')
-    updated, _ = _shortcut(old, tmp_path / 'CouchCHD')
+    updated, _, _ = _shortcut(old, tmp_path / 'CouchCHD', tmp_path / 'grid')
     assert updated.startswith(old[:-2])
     assert set(vdf.binary_loads(updated)['shortcuts']) == {'4', '5'}
 
@@ -31,7 +33,7 @@ def test_existing_shortcut_bytes_are_never_recoded(tmp_path):
 @pytest.mark.parametrize('blob', [b'', b'not vdf', b'\x00shortcuts\x00\x08', vdf.binary_dumps({'other': {}})])
 def test_invalid_existing_shortcuts_abort(tmp_path, blob):
     with pytest.raises(RuntimeError):
-        _shortcut(blob, tmp_path / 'CouchCHD')
+        _shortcut(blob, tmp_path / 'CouchCHD', tmp_path / 'grid')
 
 
 @pytest.mark.parametrize('relative', [
@@ -58,10 +60,11 @@ def test_repair_replaces_only_launch_fields(tmp_path, monkeypatch, relative):
         return vdf.binary_dumps({'shortcuts': {'2': other, '9': entry, '10': other}}).replace(b'PLACE', b'T\xffST!')
 
     expected = document(dict(item, eXe=f'"{launcher}"', StartDir=f'"{launcher.parent}"', LaunchOptions=''))
-    updated, appid = _shortcut(document(item), launcher)
+    updated, appid, icon = _shortcut(document(item), launcher, tmp_path / 'grid')
+    assert icon == b'/my/custom.ico'
     assert updated == expected
     assert appid == signed_id & 0xffffffff
-    assert _shortcut(updated, launcher) == (expected, appid)
+    assert _shortcut(updated, launcher, tmp_path / 'grid') == (expected, appid, icon)
 
 
 @pytest.mark.parametrize('filename', ['CouchCHD.AppImage', 'CouchCHD.desktop', 'CouchCHD-x86_64.AppImage'])
@@ -69,7 +72,7 @@ def test_distinct_external_build_is_preserved(tmp_path, filename):
     item = {'Exe': str(tmp_path / 'experimental' / filename), 'AppName': 'Experimental disc tools', 'appid': -22}
     original = vdf.binary_dumps({'shortcuts': {'3': item}})
     launcher = tmp_path / 'installed/run-couchchd'
-    blob, _ = _shortcut(original, launcher)
+    blob, _, _ = _shortcut(original, launcher, tmp_path / 'grid')
     assert blob.startswith(original[:-2])
     assert vdf.binary_loads(blob)['shortcuts']['4']['Exe'] == f'"{launcher}"'
 
@@ -77,9 +80,10 @@ def test_distinct_external_build_is_preserved(tmp_path, filename):
 def test_manual_entry_without_startdir_gets_one_and_keeps_custom_options_on_current_target(tmp_path):
     launcher = tmp_path / 'run-couchchd'
     item = {'Exe': str(launcher), 'appid': -100, 'LaunchOptions': '--root "/my games"'}
-    blob, _ = _shortcut(vdf.binary_dumps({'shortcuts': {'5': item}}), launcher)
+    grid = tmp_path / 'grid'
+    blob, appid, _ = _shortcut(vdf.binary_dumps({'shortcuts': {'5': item}}), launcher, grid)
     assert vdf.binary_loads(blob)['shortcuts'] == {
-        '5': dict(item, Exe=f'"{launcher}"', StartDir=f'"{tmp_path}"')}
+        '5': dict(item, Exe=f'"{launcher}"', StartDir=f'"{tmp_path}"', icon=str(grid / f'{appid}_icon.png'))}
 
 
 @pytest.mark.parametrize(('entries', 'reason'), [
@@ -96,7 +100,7 @@ def test_manual_entry_without_startdir_gets_one_and_keeps_custom_options_on_curr
 def test_conflicts_are_not_merged_or_duplicated(tmp_path, entries, reason):
     entries = {i: dict(entry, Exe=str(Path(entry['Exe']).absolute())) for i, entry in entries.items()}
     with pytest.raises(RuntimeError, match=reason):
-        _shortcut(vdf.binary_dumps({'shortcuts': entries}), tmp_path / 'installed/run-couchchd')
+        _shortcut(vdf.binary_dumps({'shortcuts': entries}), tmp_path / 'installed/run-couchchd', tmp_path / 'grid')
 
 
 def test_exported_launcher_wins_over_appimage(tmp_path, monkeypatch):
@@ -133,13 +137,21 @@ def test_register_requires_offline_then_preserves_backup_and_art(tmp_path, monke
 
     grid = config / 'grid'
     grid.mkdir()
-    for suffix in ('p', '_hero'):
-        (grid / f'{signed_id & 0xffffffff}{suffix}.jpg').write_bytes(b'user artwork')
+    appid = signed_id & 0xffffffff
+    for suffix in ('P.JPG', '_HERO.WebP', '_ICON.ico'):
+        (grid / f'{appid}{suffix}').write_bytes(b'user artwork')
+    placement = grid / f'{appid}.json'
+    placement.write_text('{"pinnedPosition":"BottomLeft"}')
     steam.register(launcher)
     assert (config / 'shortcuts.vdf.couchchd-backup').read_bytes() == original
     assert vdf.binary_loads(shortcuts.read_bytes())['shortcuts'] == {'4': {
-        'AppName': 'CouchCHD', 'Exe': f'"{launcher}"', 'appid': signed_id, 'StartDir': f'"{tmp_path}"'}}
-    assert sorted(p.read_bytes() for p in grid.iterdir()) == [b'user artwork'] * 2
+        'AppName': 'CouchCHD', 'Exe': f'"{launcher}"', 'appid': signed_id, 'StartDir': f'"{tmp_path}"',
+        'icon': str(grid / f'{appid}_ICON.ico')}}
+    assert {p.name for p in grid.iterdir()} == {
+        f'{appid}{suffix}' for suffix in ('P.JPG', '_HERO.WebP', '_ICON.ico', '.json', '.png', '_logo.png')}
+    assert all((grid / f'{appid}{suffix}').read_bytes() == b'user artwork'
+               for suffix in ('P.JPG', '_HERO.WebP', '_ICON.ico'))
+    assert placement.read_text() == '{"pinnedPosition":"BottomLeft"}'
     steam.register(launcher)
     assert (config / 'shortcuts.vdf.couchchd-backup').read_bytes() == original
 
@@ -171,3 +183,80 @@ def test_running_with_ambiguous_accounts_is_not_a_retryable_registration(tmp_pat
     with pytest.raises(RuntimeError, match='identify the active Steam account') as caught:
         steam.register(tmp_path / 'run-couchchd')
     assert not isinstance(caught.value, steam.SteamRunning)
+
+
+@pytest.fixture
+def profile(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.delenv('SteamAppId', raising=False)
+    monkeypatch.delenv('SteamGameId', raising=False)
+    root = tmp_path / '.local/share/Steam'
+    config = root / 'userdata/123/config'
+    config.mkdir(parents=True)
+    monkeypatch.setattr(steam, '_steam_dir', lambda: root)
+    launcher = tmp_path / 'couchchd/run-couchchd'
+    launcher.parent.mkdir()
+    launcher.touch(mode=0o755)
+    file = config / 'shortcuts.vdf'
+    file.write_bytes(vdf.binary_dumps({'shortcuts': {'7': {
+        'AppName': 'My renamed app', 'Exe': f'"{launcher}"', 'appid': -12, 'icon': ''}}}))
+    return launcher, file, (-12 & 0xffffffff)
+
+
+def test_live_refresh_uses_recorded_id_and_never_edits_shortcuts(profile, monkeypatch):
+    launcher, file, appid = profile
+    original = file.read_bytes()
+    monkeypatch.setenv('SteamGameId', str((appid << 32) | 0x02000000))
+    monkeypatch.setenv('SteamAppId', '0')
+    grid = file.parent / 'grid'
+    grid.mkdir()
+    (grid / f'{appid}_LOGO.JpEg').write_bytes(b'my logo')
+    message = steam.refresh_artwork(launcher)
+    assert 'portrait, landscape, hero, icon' in message and 'exit Steam' in message
+    assert 'No missing' in steam.refresh_artwork(launcher)
+    assert file.read_bytes() == original
+    assert {p.name for p in file.parent.iterdir()} == {'grid', 'shortcuts.vdf'}
+    assert (grid / f'{appid}_LOGO.JpEg').read_bytes() == b'my logo'
+    assert not (grid / f'{appid}_logo.png').exists()
+    assert not (file.parents[3] / 'controller_base').exists()
+
+
+@pytest.mark.parametrize('conflict', ['wrong-game', 'wrong-app', 'other-installation', 'other-account',
+                                      'duplicate', 'unregistered', 'malformed', 'linked-grid'])
+def test_live_refresh_fails_closed(profile, monkeypatch, conflict):
+    launcher, file, appid = profile
+    if conflict == 'wrong-game':
+        monkeypatch.setenv('SteamGameId', str(((appid + 1) << 32) | 0x02000000))
+    elif conflict == 'wrong-app':
+        monkeypatch.setenv('SteamAppId', '99')
+    elif conflict == 'other-account':
+        (file.parents[2] / '456/config').mkdir(parents=True)
+    elif conflict == 'unregistered':
+        file.write_bytes(vdf.binary_dumps({'shortcuts': {}}))
+    elif conflict == 'malformed':
+        file.write_bytes(b'incomplete')
+    elif conflict == 'linked-grid':
+        (file.parent / 'grid').symlink_to(launcher.parent, target_is_directory=True)
+    else:
+        entries = vdf.binary_loads(file.read_bytes())['shortcuts']
+        if conflict == 'duplicate':
+            entries['8'] = dict(entries['7'], appid=-13)
+        else:
+            entries['7'].update(AppName='CouchCHD', Exe='/opt/experimental/CouchCHD.AppImage')
+        file.write_bytes(vdf.binary_dumps({'shortcuts': entries}))
+    original = file.read_bytes()
+    with pytest.raises(RuntimeError):
+        steam.refresh_artwork(launcher)
+    assert file.read_bytes() == original
+    assert not list(file.parents[2].rglob('*.png')) and not list(launcher.parent.glob('*.png'))
+
+
+def test_external_icon_preserved_without_another_steam_icon(profile):
+    launcher, file, appid = profile
+    entries = vdf.binary_loads(file.read_bytes())
+    entries['shortcuts']['7']['icon'] = '/chosen custom art/ICON.ico'
+    file.write_bytes(vdf.binary_dumps(entries))
+    assert 'attach the shortcut icon' not in steam.refresh_artwork(launcher)
+    assert not (file.parent / 'grid' / f'{appid}_icon.png').exists()
+    steam.register(launcher)
+    assert vdf.binary_loads(file.read_bytes())['shortcuts']['7']['icon'] == '/chosen custom art/ICON.ico'

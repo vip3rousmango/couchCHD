@@ -22,6 +22,7 @@ from pathlib import Path
 from . import hardware
 from .ledger import install_new
 from .scanner import FileLine, Game, inspect
+from .telemetry import StageSampler
 
 
 def tool_path() -> Path:
@@ -98,16 +99,19 @@ def _drain(pipe, command: str, updates: deque[str] | None) -> _Report:
 
 def _run(tool: Path, *args: str | Path, cancel: threading.Event, cwd: Path,
          returns: tuple[int, ...] = (0,), progress: Callable[[str], None] | None = None,
-         disc: str = '') -> _Report:
+         disc: str = '', on_stage=None, logical_bytes: int = 0, device_cpus: int = 0) -> _Report:
     _cancelled(cancel)
     command = str(args[0])
     # One producer drains both streams, one consumer samples the latest value.
     # A slow UI/terminal neither blocks the pipe reader nor builds up a queue.
-    updates = deque(maxlen=1) if progress is not None else None
-    title = f'{"Verifying" if command == "verify" else "Compressing"}: {disc}'
+    updates = deque(maxlen=1) if progress is not None or on_stage is not None else None
+    stage = 'verifying' if command == 'verify' else 'compressing'
+    if on_stage is not None:
+        on_stage(stage)
     if progress is not None:
+        title = f'{stage.capitalize()}: {disc}'
         progress(title)
-        _cancelled(cancel)
+    _cancelled(cancel)
     sent = None
     next_progress = next_thermal_check = float('-inf')
     with ThreadPoolExecutor(max_workers=1) as reader, subprocess.Popen(
@@ -115,6 +119,10 @@ def _run(tool: Path, *args: str | Path, cancel: threading.Event, cwd: Path,
             stderr=subprocess.STDOUT, start_new_session=os.name == 'posix') as proc:
         try:
             output = reader.submit(_drain, proc.stdout, command, updates)
+            if on_stage is not None:
+                started = time.monotonic()
+                sampler = StageSampler(proc.pid, device_cpus, logical_bytes, started)
+                next_sample = started + 1
             # Don't reap a child until its writer closes. On POSIX a wrapper
             # may exit first; retain the process group for safe cancellation.
             while not output.done() or proc.poll() is None:
@@ -130,6 +138,11 @@ def _run(tool: Path, *args: str | Path, cancel: threading.Event, cwd: Path,
                     if latest != sent:
                         progress(f'{title} ({latest}%)')
                         sent, next_progress = latest, now + 1
+                if on_stage is not None and now >= next_sample:
+                    percent = float(updates[-1]) if updates else None
+                    speed, cpu = sampler.sample(percent, now)
+                    on_stage(stage, percent, speed, cpu)
+                    next_sample = now + 1
                 cancel.wait(.1)
             result = output.result()  # includes any final buffered checksums/errors
         except BaseException:
@@ -154,6 +167,10 @@ def _run(tool: Path, *args: str | Path, cancel: threading.Event, cwd: Path,
         raise ValueError(f'chdman {command} report too large to validate')
     if progress is not None and updates and updates[-1] != sent:
         progress(f'{title} ({updates[-1]}%)')
+    if on_stage is not None:
+        # The process has exited; don't display its last CPU/rate during
+        # subsequent metadata checks, fsync or publication.
+        on_stage(stage, float(updates[-1]) if updates else None)
     return result
 
 
@@ -166,8 +183,10 @@ def _version(tool: Path, cwd: Path, cancel: threading.Event) -> None:
 
 
 def _verify(tool: Path, chd: Path, cwd: Path, cancel: threading.Event, *,
-            progress: Callable[[str], None] | None = None, disc: str = '') -> None:
-    report = _run(tool, 'verify', '-i', chd, cwd=cwd, cancel=cancel, progress=progress, disc=disc)
+            progress: Callable[[str], None] | None = None, disc: str = '',
+            on_stage=None, logical_bytes: int = 0, device_cpus: int = 0) -> None:
+    report = _run(tool, 'verify', '-i', chd, cwd=cwd, cancel=cancel, progress=progress, disc=disc,
+                  on_stage=on_stage, logical_bytes=logical_bytes, device_cpus=device_cpus)
     # Some MAME releases *return zero* for a mismatch or missing checksums. Require
     # positive confirmation of both data and metadata, not merely an exit status.
     if not report.checksums_ok:
@@ -257,7 +276,8 @@ def _sync(path: Path) -> None:
 
 
 def convert(game: Game, output: Path, tool: Path, *, cancel: threading.Event, threads: int,
-            progress: Callable[[str], None] | None = None) -> None:
+            progress: Callable[[str], None] | None = None, on_stage=None, device_cpus: int = 0,
+            fast_cd: bool = False) -> None:
     if threads < 1:
         raise ValueError('At least one compression thread is required')
     _cancelled(cancel)
@@ -272,13 +292,24 @@ def convert(game: Game, output: Path, tool: Path, *, cancel: threading.Event, th
             _version(tool, work, cancel)
             source = _input(game, work, cancel)
             partial = work / (game.source.stem + '.chd.part')
-            # One widely supported lossless codec instead of trial-compressing
-            # each 2 KiB DVD hunk with MAME's entire default codec set.
-            flags = ['-hs', '2048', '-c', 'zlib'] if game.mode == 'createdvd' else []
+            logical_bytes = 0
+            if on_stage is not None:
+                # CHD CD tracks contain data + subcode in 2448-byte units,
+                # padded to 4 frames per track. DVD units hold 2048 bytes.
+                logical_bytes = (game.frames[0] * 2048 if game.mode == 'createdvd' else
+                                 sum((frames + 3) // 4 * 4 for frames in game.frames) * 2448)
+            if game.mode == 'createdvd':
+                flags = ['-hs', '2048', '-c', 'zlib']
+            else:
+                # Skip LZMA trials on portables. Keep FLAC for audio tracks
+                # and chdman's standard CD hunk geometry for every system.
+                flags = ['-c', 'cdzl,cdfl'] if fast_cd else []
             _run(tool, game.mode, '-i', source, '-o', partial, *flags, '-np', str(threads),
-                 cwd=work, cancel=cancel, progress=progress, disc=game.source.name)
+                 cwd=work, cancel=cancel, progress=progress, disc=game.source.name,
+                 on_stage=on_stage, logical_bytes=logical_bytes, device_cpus=device_cpus)
             _nonempty(partial)
-            _verify(tool, partial, work, cancel, progress=progress, disc=game.source.name)
+            _verify(tool, partial, work, cancel, progress=progress, disc=game.source.name,
+                    on_stage=on_stage, logical_bytes=logical_bytes, device_cpus=device_cpus)
             flags = ['-v'] if game.mode == 'createcd' else []  # Never compare truncated track metadata.
             report = _run(tool, 'info', '-i', partial, *flags, cwd=work, cancel=cancel)
             _match(game, report.text)

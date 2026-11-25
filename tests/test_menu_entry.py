@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from couchchd.menu_entry import install_desktop, install_script
+from couchchd.menu_entry import install_desktop, install_script, refresh_desktop_artwork
 
 pytestmark = pytest.mark.skipif(os.name != 'posix', reason='Linux launchers')
 
@@ -40,3 +40,30 @@ def test_desktop_entry_escapes_field_codes_and_quotes(tmp_path, monkeypatch):
     entry = install_desktop(launcher)
     assert entry.parent == tmp_path / 'applications'
     assert r'%%u \\"folder\\"/run-couchchd"' in entry.read_text()
+
+
+def test_migrate_only_exact_managed_desktop_and_keep_replacement_icon(tmp_path, monkeypatch):
+    monkeypatch.setenv('XDG_DATA_HOME', str(tmp_path))
+    launcher = tmp_path / 'My Apps/run-couchchd'
+    assert 'No registered' in refresh_desktop_artwork(launcher)
+    assert not list(tmp_path.iterdir())
+    name = 'io.github.vip3rousmango.CouchCHD'
+    entry = tmp_path / 'applications' / (name + '.desktop')
+    entry.parent.mkdir()
+    legacy = ('[Desktop Entry]\nType=Application\nName=CouchCHD\n'
+              f'Exec="{launcher}"\nIcon=applications-games\nTerminal=false\nCategories=Game;Utility;\n')
+    entry.write_text(legacy)
+    entry.chmod(0o640)
+    refresh_desktop_artwork(launcher)
+    assert entry.read_text() == legacy.replace('Icon=applications-games', f'Icon={name}')
+    assert entry.stat().st_mode & 0o777 == 0o640
+    icon = tmp_path / f'icons/hicolor/scalable/apps/{name}.svg'
+    assert '<svg' in icon.read_text()
+    icon.write_bytes(b'custom artwork')
+    refresh_desktop_artwork(launcher)
+    assert icon.read_bytes() == b'custom artwork'
+    entry.write_text(legacy + 'Actions=custom;\n')
+    icon.unlink()
+    assert 'Customized' in refresh_desktop_artwork(launcher)
+    assert install_desktop(launcher) == entry and not icon.exists()
+    assert entry.read_text() == legacy + 'Actions=custom;\n'

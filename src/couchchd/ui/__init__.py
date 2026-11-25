@@ -19,7 +19,7 @@ def launch(root: Path | None = None) -> int:
     app.setApplicationName('CouchCHD')
     QQuickStyle.setStyle('Basic')
     directory = Path(__file__).resolve().parent
-    app.setWindowIcon(QIcon(str(directory / 'assets' / 'mark.svg')))
+    app.setWindowIcon(QIcon(str(directory / 'assets' / 'icon.svg')))
     engine = QQmlApplicationEngine()
     bridge = Bridge(root)
     pad = InputRouter(app)
