@@ -15,7 +15,7 @@ Public managed installs (preview.4 and later): while idle, open Settings >
 Update CouchCHD. The new verified build starts on your next normal launch.
 Source, standalone and private installs are not switched to the public channel.
 
-Recalbox (64-bit userspace, glibc 2.36+, writable executable SHARE):
+Recalbox (64-bit userspace, glibc 2.36+, writable SHARE):
 Use scripts/install-device.sh for a persistent EmulationStation entry. When
 ready, press START > QUIT > RESTART RECALBOX. Open Ports > CouchCHD. If Ports
 is hidden, enable START > SYSTEM-LISTS & GAMELISTS SETTINGS > SHOW PORTS SYSTEM.
@@ -28,15 +28,18 @@ registers one custom port in
 is registered explicitly. roms/ports/couchchd/CouchCHD.game is only a list
 entry; its contents are not executed. The port's command starts the installed
 /recalbox/share/system/couchchd/run-couchchd, not an emulator. Reinstalling
-preserves other systems and existing gamelist metadata. No remount is needed.
+preserves other systems and existing gamelist metadata. On exFAT with masked
+file execute bits, setup stores a compressed SquashFS image on the same SD
+card. The Ports launcher verifies it and mounts it read-only for the session.
+This requires loop/SquashFS mount support; no SHARE or boot remount is needed.
 
 ES releases its window for the launch but remains running. Do not edit game
 metadata from this menu session: ES can overwrite gamelist.xml from cache.
 For gamelist writes, stop ES cleanly first and run the stable launcher
-separately. For a scan over SSH, use run-couchchd --headless --root
-/recalbox/share/roms (all on one line). For a manual install without a menu
-entry, extract the ARM archive under /recalbox/share/system and run
-/recalbox/share/system/couchchd/launch-recalbox.sh with ES stopped.
+separately. On single-card exFAT use:
+  sh /recalbox/share/system/couchchd/run-couchchd --headless --root /recalbox/share/roms
+Use the installer's printed launcher path for other layouts. An explicit
+noexec SHARE policy is not overridden by the single-card installer.
 
 Without a display server the ARM launcher selects EGLFS; it needs working
 EGL/KMS drivers and /dev/dri and /dev/input access. Set QT_QPA_PLATFORM to

@@ -121,6 +121,38 @@ jobs:
           sudo "$launcher" --version
           sudo grep -F "$launcher" /recalbox/share/system/.emulationstation/systemlist.xml
           sudo test -f /recalbox/share/roms/ports/couchchd/CouchCHD.game
+      - name: Install on a single exFAT card and convert with the installed ARM launcher
+        run: |
+          set -euo pipefail
+          sudo umount /media/couchchd-test /recalbox/share
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends exfatprogs
+          sudo modprobe loop
+          sudo modprobe squashfs
+          truncate -s 1G "$RUNNER_TEMP/share.exfat"
+          mkfs.exfat "$RUNNER_TEMP/share.exfat"
+          sudo mount -t exfat -o loop,rw,fmask=0133,dmask=0022 "$RUNNER_TEMP/share.exfat" /recalbox/share
+          sudo mkdir -p /recalbox/share/{system/.emulationstation,roms/ports}
+          asset=CouchCHD-Recalbox-aarch64.squashfs
+          digest=$(awk -v f="$asset" '$2 == f {print $1}' release/SHA256SUMS-aarch64)
+          test "${#digest}" = 64
+          sudo sh scripts/install-device.sh --receive aarch64 "$digest" < "release/$asset"
+          launcher=/recalbox/share/system/couchchd/run-couchchd
+          sudo test ! -x "$launcher"
+          sudo sh "$launcher" --version
+          # Reattach only the card. No prior runtime mount or external disk
+          # should be needed to launch the installed build again.
+          sudo umount /recalbox/share
+          sudo mount -t exfat -o loop,rw,fmask=0133,dmask=0022 "$RUNNER_TEMP/share.exfat" /recalbox/share
+          sudo test -f /recalbox/share/roms/ports/couchchd/CouchCHD.game
+          sudo grep -F "$launcher" /recalbox/share/system/.emulationstation/systemlist.xml
+          sudo mkdir -p /recalbox/share/roms/psx
+          sudo dd if=/dev/zero of=/recalbox/share/roms/psx/test.bin bs=2352 count=300 status=none
+          printf 'FILE "test.bin" BINARY\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n' | sudo tee /recalbox/share/roms/psx/test.cue >/dev/null
+          sudo touch -d '1 minute ago' /recalbox/share/roms/psx/test.{bin,cue}
+          sudo sh "$launcher" --headless --root /recalbox/share/roms --auto --system psx --keep-originals --preset silent
+          sudo test -s /recalbox/share/roms/psx/test.chd
+          sudo test -s /recalbox/share/roms/psx/test.bin
   release:
     # Manual dispatch builds artifacts only. Public previews and normal tag drafts
     # both require all native build, conversion, Qt and installer gates to pass.
@@ -166,7 +198,7 @@ jobs:
           gh release create "$TAG" --repo "$REPO" --verify-tag "${visibility[@]}" --title "$title" --notes-file - ./* <<'NOTES'
           Hardware testing build, not device certification. Back up your library and test with disposable copies first.
 
-          Native Linux x86_64 AppImage and aarch64 tarball, built on Debian 12; 64-bit glibc 2.36+ userspace required. The ARM asset retains its original Recalbox filename. Qt also requires a working graphics/input stack; ARM devices without a desktop display need compatible EGL/KMS drivers. AArch64 architecture alone does not establish Pi, distro or frontend compatibility. See INSTALL.txt in the bundles. rclone is optional.
+          Native Linux x86_64 AppImage, aarch64 tarball and aarch64 SquashFS (single-card Recalbox), built on Debian 12; 64-bit glibc 2.36+ userspace required. Qt also needs a working graphics/input stack; ARM devices without a desktop display need compatible EGL/KMS drivers. AArch64 architecture alone does not establish Pi, Android, distro or frontend compatibility. See INSTALL.txt in the bundles. rclone is optional.
 
           Verify downloaded files using the attached SHA256SUMS (`sha256sum --ignore-missing -c SHA256SUMS`). On public GitHub, verify the checksum manifest's provenance with `gh attestation verify SHA256SUMS --repo vip3rousmango/couchCHD`. For chdman alone, extract the architecture-specific tarball and run `sha256sum -c SHA256SUMS` inside its architecture directory.
 

@@ -94,6 +94,10 @@ if [[ $arch == x86_64 ]]; then
     launch=("$out/CouchCHD-x86_64.AppImage" --appimage-extract-and-run)
 else
     install -m 755 packaging/launch-recalbox.sh "$app/"
+    # A single-card Recalbox can store this as data on exFAT. The read-only
+    # filesystem preserves the bundle's Linux modes without a RAM-sized copy.
+    mksquashfs "$app" "$out/CouchCHD-Recalbox-aarch64.squashfs" \
+        -noappend -all-root -no-xattrs -comp gzip -processors "${JOBS:-2}"
     archive="$out/CouchCHD-Recalbox-aarch64.tar.gz"
     # PyInstaller creates symlinks; exFAT data partitions cannot represent them.
     tar --dereference --hard-dereference -C "$work/frozen" -czf "$archive" couchchd
