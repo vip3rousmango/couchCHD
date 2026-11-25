@@ -16,6 +16,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -276,7 +277,7 @@ def _sync(path: Path) -> None:
         os.fsync(file.fileno())
 
 
-def _write_image(game, partial, work, tool, cancel, threads, progress, on_stage, device_cpus, fast_cd):
+def _write_image(game, partial, work, tool, cancel, threads, progress, on_stage, device_cpus, fast_cd, disc_name):
     if game.mode not in ('createcd', 'createdvd'):
         from . import archive7z, cso, rvz, trim3ds, xiso
 
@@ -291,11 +292,19 @@ def _write_image(game, partial, work, tool, cancel, threads, progress, on_stage,
                 key = (stage, int(percent) if percent is not None else None)
                 if key != last:
                     suffix = '' if key[1] is None else f' ({key[1]}%)'
-                    progress(f'{stage.capitalize()}: {game.source.name}{suffix}')
+                    progress(f'{stage.capitalize()}: {disc_name}{suffix}')
                     last = key
 
-        codec.convert(game.source, partial, cancel=cancel, threads=threads,
-                      on_stage=report if progress is not None or on_stage is not None else None)
+        callback = report if progress is not None or on_stage is not None else None
+        if game.archive is not None:
+            from . import disc_zip
+            if (game.mode != 'cso' or game.system != 'psp' or len(game.archive.members) != 1
+                    or game.archive.entry.suffix.lower() != '.iso'):
+                raise ValueError('Streaming conversion requires one archived PSP ISO')
+            cso.convert_stream(lambda: disc_zip.open_member(game, game.archive.entry), game.size, partial,
+                               cancel=cancel, on_stage=callback)
+        else:
+            codec.convert(game.source, partial, cancel=cancel, threads=threads, on_stage=callback)
         return
 
     tool = tool.resolve(strict=True) if tool is not None else tool_path()
@@ -309,10 +318,10 @@ def _write_image(game, partial, work, tool, cancel, threads, progress, on_stage,
     else:
         flags = ['-c', 'cdzl,cdfl'] if fast_cd else []
     _run(tool, game.mode, '-i', source, '-o', partial, *flags, '-np', str(threads),
-         cwd=work, cancel=cancel, progress=progress, disc=game.source.name,
+         cwd=work, cancel=cancel, progress=progress, disc=disc_name,
          on_stage=on_stage, logical_bytes=logical_bytes, device_cpus=device_cpus)
     _nonempty(partial)
-    _verify(tool, partial, work, cancel, progress=progress, disc=game.source.name,
+    _verify(tool, partial, work, cancel, progress=progress, disc=disc_name,
             on_stage=on_stage, logical_bytes=logical_bytes, device_cpus=device_cpus)
     flags = ['-v'] if game.mode == 'createcd' else []
     report = _run(tool, 'info', '-i', partial, *flags, cwd=work, cancel=cancel)
@@ -321,7 +330,7 @@ def _write_image(game, partial, work, tool, cancel, threads, progress, on_stage,
 
 def convert(game: Game, output: Path, tool: Path | None = None, *, cancel: threading.Event, threads: int,
             progress: Callable[[str], None] | None = None, on_stage=None, device_cpus: int = 0,
-            fast_cd: bool = False) -> None:
+            fast_cd: bool = False, archive_scratch: Path | None = None) -> None:
     if threads < 1:
         raise ValueError('At least one compression thread is required')
     _cancelled(cancel)
@@ -332,11 +341,21 @@ def convert(game: Game, output: Path, tool: Path | None = None, *, cancel: threa
     if game.mode not in SUFFIX_BY_MODE:
         raise ValueError(f'Unsupported conversion mode: {game.mode}')
     try:
-        with tempfile.TemporaryDirectory(prefix='convert-', dir=base) as tmp:
-            work = Path(tmp)
+        with ExitStack() as stack:
+            work = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='convert-', dir=base)))
             partial = work / ('output' + SUFFIX_BY_MODE[game.mode])
-            _write_image(game, partial, work, tool, cancel, threads, progress, on_stage, device_cpus, fast_cd)
+            staged = game
+            if game.archive is not None and game.mode != 'cso':
+                from . import zip_stage
+                scratch = _workdir(archive_scratch) if archive_scratch is not None else base
+                if scratch != base:
+                    work = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='convert-', dir=scratch)))
+                staged = zip_stage.prepare(game, work, cancel)
+            _write_image(staged, partial, work, tool, cancel, threads, progress, on_stage, device_cpus, fast_cd,
+                         game.source.name)
             _nonempty(partial)
+            if staged is not game:
+                staged.assert_unchanged()
             _sync(partial)
             game.assert_unchanged()
             _cancelled(cancel)
@@ -362,7 +381,8 @@ def recover(root: Path) -> None:
             item = path / name
             owned = name.endswith('.chd.part') or bool(_STAGED_OUTPUT.fullmatch(name)) or internal and (
                 name in _PRIVATE_OUTPUTS or re.fullmatch(
-                    r'input\.(?:cue|gdi)|track\d{4}\.bin|(?:disc|publish)\.cue|disc(?: \(Track \d+\))?\.bin', name))
+                    r'input\.(?:cue|gdi)|track\d{4}\.bin|zip-source\.(?:iso|gcm|cue|gdi)|zip-track\d{4}\.bin|'
+                    r'(?:disc|publish)\.cue|disc(?: \(Track \d+\))?\.bin', name))
             if owned and stat.S_ISREG(item.lstat().st_mode):
                 item.unlink()
         if internal and not any(path.iterdir()):

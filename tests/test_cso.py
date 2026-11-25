@@ -1,6 +1,7 @@
 import random
 import struct
 import zlib
+from io import BytesIO
 from threading import Event
 
 import pytest
@@ -43,6 +44,24 @@ def test_v1_stream_decodes_as_iso(tmp_path):
         decoded.extend(sector)
     assert decoded == original == source.read_bytes()
     assert ('compressing', 0.0) in progress and ('verifying', 100.0) in progress
+
+
+def test_nonseekable_stream_is_reopened_and_every_sector_compared(tmp_path):
+    class Sequential(BytesIO):
+        def seek(self, *args):
+            raise AssertionError('archived ISO readers must not seek')
+
+        def read(self, size):
+            assert 0 <= size <= 1024 * 1024
+            return super().read(size)
+
+    original = _iso()
+    changed = original[:-1] + bytes([original[-1] ^ 1])
+    passes = iter((original, changed))
+    target = tmp_path / 'changed.cso'
+    with pytest.raises(ValueError, match='differs from original ISO'):
+        cso.convert_stream(lambda: Sequential(next(passes)), len(original), target, cancel=Event())
+    assert not target.exists() and next(passes, None) is None
 
 
 @pytest.mark.parametrize('size,shift', [(2**31, 1), (2**32, 2), (2**32 + _SECTOR, 2)])
@@ -88,7 +107,8 @@ def test_shifted_raw_deflate_and_padding_verified(tmp_path):
     entries.append((start + len(data)) // 2)
     target.write_bytes(struct.pack('<4sIQIBB2x', b'CISO', 24, len(original), _SECTOR, 1, 1)
                        + struct.pack(f'<{len(entries)}I', *entries) + data)
-    cso._verify(source, target, Event(), None)
+    with source.open('rb') as disc:
+        cso._verify(disc, len(original), target, Event(), None)
 
 
 @pytest.mark.parametrize('mutation', ['header', 'index-backward', 'index-huge', 'raw', 'deflate', 'end', 'trailing'])
@@ -115,8 +135,8 @@ def test_verifier_rejects_corrupt_artifact(tmp_path, mutation):
     else:
         data.extend(b'extra')
     target.write_bytes(data)
-    with pytest.raises(ValueError):
-        cso._verify(source, target, Event(), None)
+    with source.open('rb') as disc, pytest.raises(ValueError):
+        cso._verify(disc, source.stat().st_size, target, Event(), None)
 
 
 def test_invalid_iso_and_wrong_system_rejected(tmp_path):

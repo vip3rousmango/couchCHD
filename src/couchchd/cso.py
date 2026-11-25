@@ -30,18 +30,24 @@ def _layout(size: int) -> tuple[int, int]:
     raise ValueError('ISO too large for CSO v1 sector indices')
 
 
+def _geometry(size: int):
+    if size < 17 * _SECTOR or size % _SECTOR:
+        raise ValueError('PSP ISO has incomplete or missing 2048-byte sectors')
+    return _layout(size)
+
+
+def _signature(data):
+    if len(data) != 7 or data[1:] != b'CD001\x01' or data[0] not in range(4):
+        raise ValueError('PSP ISO lacks an ISO 9660 volume descriptor')
+
+
 def validate(source: Path, system: str) -> None:
     if system != 'psp' or source.suffix.lower() != '.iso' or not stat.S_ISREG(source.lstat().st_mode):
         raise ValueError('CSO requires a regular PSP ISO')
     with source.open('rb') as disc:
-        size = os.fstat(disc.fileno()).st_size
-        if size < 17 * _SECTOR or size % _SECTOR:
-            raise ValueError('PSP ISO has incomplete or missing 2048-byte sectors')
+        _geometry(os.fstat(disc.fileno()).st_size)
         disc.seek(16 * _SECTOR)
-        signature = disc.read(7)
-        if len(signature) != 7 or signature[1:] != b'CD001\x01' or signature[0] not in range(4):
-            raise ValueError('PSP ISO lacks an ISO 9660 volume descriptor')
-        _layout(size)
+        _signature(disc.read(7))
 
 
 def _read(stream, count: int) -> bytes:
@@ -68,12 +74,14 @@ def _batches(sectors, stage, cancel, on_stage):
 
 
 def _encode(disc, out, size, cancel, on_stage):
-    shift, first = _layout(size)
+    shift, first = _geometry(size)
     align = 1 << shift
     out.write(_HEADER.pack(b'CISO', _HEADER.size, size, _SECTOR, 1, shift))
     out.seek(first)
     for done, count in _batches(size // _SECTOR, 'compressing', cancel, on_stage):
         chunk = memoryview(_read(disc, count * _SECTOR))
+        if done == 0:
+            _signature(chunk[16 * _SECTOR:16 * _SECTOR + 7])
         entries = bytearray(count * _INDEX.size)
         for i in range(count):
             sector = chunk[i * _SECTOR:(i + 1) * _SECTOR]
@@ -100,11 +108,10 @@ def _encode(disc, out, size, cancel, on_stage):
         raise ValueError('ISO grew during encoding')
 
 
-def _verify(source, target, cancel, on_stage):
+def _verify(disc, size, target, cancel, on_stage):
     # Decode the on-disk header and two sequential streams (table, payload).
     # Never allocate based on a length from the candidate file.
-    with source.open('rb') as disc, target.open('rb') as index, target.open('rb') as data:
-        size = os.fstat(disc.fileno()).st_size
+    with target.open('rb') as index, target.open('rb') as data:
         magic, header_size, total, block, version, shift = _HEADER.unpack(_read(index, _HEADER.size))
         if (magic, header_size, total, block, version) != (b'CISO', _HEADER.size, size, _SECTOR, 1) or shift > 11:
             raise ValueError('Invalid CSO v1 header')
@@ -139,18 +146,24 @@ def _verify(source, target, cancel, on_stage):
             raise ValueError('Invalid CSO end index or trailing data')
 
 
-def convert(source: Path, target: Path, *, cancel, threads: int, on_stage=None) -> None:
-    """Use one compression worker regardless of the available CPU budget."""
-    validate(source, 'psp')
+def convert_stream(open_disc, size, target, *, cancel, on_stage=None):
+    """Two independent sequential reads: encode, then compare every decoded sector."""
     if cancel.is_set():
         raise InterruptedError('CSO conversion cancelled')
-    with source.open('rb') as disc:
-        size = os.fstat(disc.fileno()).st_size
-        out = target.open('xb')  # never clobber either source or another output
-        try:
-            with out:
-                _encode(disc, out, size, cancel, on_stage)
-            _verify(source, target, cancel, on_stage)
-        except BaseException:
-            target.unlink(missing_ok=True)
-            raise
+    out = target.open('xb')  # cleanup may only remove a file this invocation created
+    try:
+        with out, open_disc() as disc:
+            _encode(disc, out, size, cancel, on_stage)
+        with open_disc() as original:
+            _verify(original, size, target, cancel, on_stage)
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+
+
+def convert(source: Path, target: Path, *, cancel, threads: int, on_stage=None) -> None:
+    """Use one compression worker regardless of the available CPU budget."""
+    info = source.lstat()
+    if source.suffix.lower() != '.iso' or not stat.S_ISREG(info.st_mode):
+        raise ValueError('CSO requires a regular PSP ISO')
+    convert_stream(lambda: source.open('rb'), info.st_size, target, cancel=cancel, on_stage=on_stage)
