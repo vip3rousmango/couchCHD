@@ -19,18 +19,20 @@ def main():
         parser.error('Use a hostname or user@hostname (SSH aliases supported).')
     ssh = ['ssh', args.device]
     installer = (scripts / 'install-device.sh').read_text()
-    arch = subprocess.check_output([*ssh, 'sh -s -- --probe'], input=installer, text=True).strip()
-    assets = {'x86_64': 'CouchCHD-x86_64.AppImage', 'aarch64': 'CouchCHD-Recalbox-aarch64.tar.gz'}
-    if arch not in assets:
-        raise ValueError(f'Unexpected device response: {arch!r}')
+    selected = subprocess.check_output([*ssh, 'sh -s -- --probe-asset'], input=installer, text=True).split()
+    assets = {'x86_64': {'CouchCHD-x86_64.AppImage'},
+              'aarch64': {'CouchCHD-Recalbox-aarch64.tar.gz', 'CouchCHD-Recalbox-aarch64.squashfs'}}
+    if len(selected) != 2 or selected[1] not in assets.get(selected[0], ()):
+        raise ValueError(f'Unexpected target release asset: {selected!r}')
+    arch, filename = selected
     directory = args.builds / arch
-    asset = assets[arch]
+    asset = directory / filename
     entries = [line.split() for line in (directory / f'SHA256SUMS-{arch}').read_text().splitlines()]
-    matches = [row[0] for row in entries if len(row) == 2 and row[1] == asset]
+    matches = [row[0] for row in entries if len(row) == 2 and row[1] == asset.name]
     if len(matches) != 1 or not re.fullmatch('[0-9a-f]{64}', matches[0]):
         raise ValueError(f'No unique SHA-256 checksum for {asset}')
     command = shlex.join(['sh', '-c', installer, 'install-device', '--receive', arch, matches[0]])
-    with (directory / asset).open('rb') as payload:
+    with asset.open('rb') as payload:
         subprocess.run([*ssh, command], stdin=payload, check=True)
 
 

@@ -7,7 +7,7 @@ import tarfile
 
 import pytest
 
-from test_device_setup import SCRIPTS, executable, target  # shared native-target fixture
+from test_device_setup import SCRIPTS, card_target, executable, recalbox_target, target
 
 pytestmark = pytest.mark.skipif(os.name != 'posix', reason='Linux device installer')
 INSTALLER = SCRIPTS / 'install-device.sh'
@@ -164,3 +164,51 @@ def test_refused_update_never_replaces_old_launcher(target, problem):
     if problem == 'switch':
         assert 'Could not switch the launcher' in result.stderr
         assert set((base / 'builds').iterdir()) == old_builds
+
+
+def test_card_update_switches_public_pointer_without_reregistering(card_target):
+    tmp, base, install, launch, publish_card = card_target
+    old = success(install('--channel'))
+    success(install())
+    launcher = base / 'run-couchchd'
+    initial_registration = (tmp / 'registration').read_bytes()
+    publish_card('second')
+    new = 'v999.0.0'
+    success(install('--apply-update', new, old, launcher))
+    assert success(launch('--version')) == 'second'
+    assert (tmp / 'registration').read_bytes() == initial_registration
+    assert f'export COUCHCHD_RELEASE_TAG={new}\n' in launcher.read_text()
+    assert not list((tmp / 'run').iterdir())
+
+
+@pytest.mark.parametrize('failure', ['corrupt-old', 'bad-download', 'mount', 'switch'])
+def test_card_update_failure_is_atomic(card_target, failure):
+    tmp, base, install, launch, publish_card = card_target
+    old = success(install('--channel'))
+    success(install())
+    launcher = base / 'run-couchchd'
+    before = launcher.read_bytes()
+    builds = set((base / 'builds').iterdir())
+    publish_card('second')
+    if failure == 'corrupt-old':
+        next((base / 'builds').glob('*/bundle.squashfs')).write_bytes(b'changed')
+    elif failure == 'bad-download':
+        next((tmp / 'artifacts/aarch64').glob('*.squashfs')).write_bytes(b'changed')
+    elif failure == 'mount':
+        (tmp / 'reject-mount').touch()
+    else:
+        executable(tmp / 'tools/mv', '''
+            for dest do :; done
+            case "$dest" in */run-couchchd) exit 1;; esac
+            exec /bin/mv "$@"
+        ''')
+    requests = (tmp / 'requests').read_bytes()
+    result = install('--apply-update', 'v999.0.0', old, launcher)
+    assert result.returncode != 0
+    assert launcher.read_bytes() == before and set((base / 'builds').iterdir()) == builds
+    assert not list((tmp / 'run').iterdir())
+    if failure == 'corrupt-old':
+        assert 'SHA-256 verification' in result.stderr and (tmp / 'requests').read_bytes() == requests
+    else:
+        (tmp / 'reject-mount').unlink(missing_ok=True)
+        assert success(launch('--version')) == 'first'

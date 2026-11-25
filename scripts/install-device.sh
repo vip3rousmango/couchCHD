@@ -78,12 +78,161 @@ stage_on_volume() {
 }
 trusted_directory() {
     [ -d "$1" ] && [ ! -L "$1" ] || return 1
-    # BusyBox and GNU stat both support %u and %a. Inspect permission bits
-    # even as root; test -w alone says nothing about another user's access.
-    perms=$(stat -c '%u:%a' "$1") || return 1
-    case $perms in 0:*|"$install_uid":*) ;; *) return 1 ;; esac
-    case ${perms#*:} in *[2367]?|*[2367]) return 1 ;; esac
+    # Some Recalbox BusyBox builds omit stat -c. Numeric POSIX ls gives
+    # the mode and UID before the pathname, including when it has spaces.
+    LC_ALL=C ls -nd "$1" | awk -v uid="$install_uid" '
+        NR == 1 && ($3 == "0" || $3 == uid) && substr($1, 1, 1) == "d" &&
+            substr($1, 6, 1) == "-" && substr($1, 9, 1) == "-" { ok=1 }
+        END { exit !ok }'
 }
+# Emit the same policy and runner for bootstrap preflight, updates and the
+# persistent launcher. The bootstrap may itself be running from curl | sh;
+# it cannot depend on an adjacent file or reopen $0 to copy its own code.
+card_script() {
+    cat <<'CARD'
+set -eu
+umask 077
+recalbox=/recalbox
+mountinfo=/proc/self/mountinfo
+temp_roots='/run /tmp'
+meminfo=/proc/meminfo
+filesystems=/proc/filesystems
+cap_status=/proc/self/status
+loop_control=/dev/loop-control
+loop_zero=/dev/loop0
+share=$recalbox/share
+base=$share/system/couchchd
+die() { printf 'CouchCHD: %s\n' "$*" >&2; exit 1; }
+uid=$(id -u)
+protected() {
+    # $2 is d (directory), - (plain file), or t (system temp root where
+    # sticky world-writable directories such as /tmp are also acceptable).
+    [ ! -L "$1" ] && LC_ALL=C ls -nd "$1" | awk -v kind="$2" -v uid="$uid" '
+        NR == 1 && ($3 == "0" || $3 == uid) {
+            type=substr($1,1,1); sticky=(substr($1,10,1) ~ /^[tT]$/)
+            ok=(type == (kind == "t" ? "d" : kind) &&
+                ((substr($1,6,1) == "-" && substr($1,9,1) == "-") || (kind == "t" && sticky)))
+        } END { exit !ok }'
+}
+card_policy() {
+    [ "$(CDPATH='' cd -P "$share/system" && pwd -P)" = "$share/system" ] &&
+        protected "$recalbox" d && protected "$share" d && protected "$share/system" d || return 1
+    for item in "$base" "$base/builds" "$base/run-couchchd"; do
+        if [ -e "$item" ] || [ -L "$item" ]; then
+            case $item in */run-couchchd) protected "$item" - && [ ! -x "$item" ] ;; *) protected "$item" d ;; esac || return 1
+        fi
+    done
+    LC_ALL=C awk -v share="$share" -v base="$base" -v boot="$recalbox/boot" '
+        {
+            mp=$5; gsub(/\\040/, " ", mp)
+            if (mp == "/" || mp == "/boot" || mp == boot) systemdev[$3]=1
+            if (mp == share "/system" || mp == base || index(mp,base "/")==1) nested=1
+            if (mp != share) next
+            count++; dev=$3
+            for (i=7; i<=NF && $i!="-"; i++) {}
+            flags="," $6 "," $(i+3) ","
+            n=split(flags,options,","); fm=um=0
+            for (j=1; j<=n; j++) {
+                if (index(options[j],"fmask=")==1) { fm++; filemask=substr(options[j],7) }
+                if (index(options[j],"umask=")==1) { um++; usermask=substr(options[j],7) }
+            }
+            mask=(fm ? filemask : usermask)
+            ok=($4 == "/" && $(i+1) == "exfat" && $(i+2) ~ /^\/dev\// &&
+                $(i+2) !~ /^\/dev\/(z?ram|nbd)[0-9]/ && flags !~ /,(noexec|ro),/ &&
+                (fm ? fm : um)==1 && mask ~ /^[0-7]?[1357][1357][1357]$/)
+        } END { exit !(ok && count == 1 && !nested && !(dev in systemdev)) }' "$mountinfo"
+}
+temporary_root() {
+    for dir in $temp_roots; do
+        [ -d "$dir" ] && [ "$(CDPATH='' cd -P "$dir" && pwd -P)" = "$dir" ] && protected "$dir" t || continue
+        LC_ALL=C awk -v path="$dir" '
+            {
+                mp=$5; gsub(/\\040/," ",mp)
+                if ((mp=="/" || path==mp || index(path,mp "/")==1) && length(mp)>=depth) {
+                    depth=length(mp)
+                    for (i=7; i<=NF && $i!="-"; i++) {}
+                    ok=($(i+1) ~ /^(tmpfs|ramfs|rootfs|overlay|ext[234]|xfs|btrfs|f2fs)$/ &&
+                        ("," $6 "," $(i+3) ",") !~ /,(noexec|ro),/)
+                }
+            } END { exit !ok }' "$mountinfo" || continue
+        printf '%s\n' "$dir"; return 0
+    done
+    return 1
+}
+card_policy || die 'Single-card mode requires a protected local exFAT SHARE masking file execute bits, without noexec or nested mounts. No mount policy changed.'
+action=$1; shift
+if [ "$action" = eligible ]; then exit 0; fi
+root=$(temporary_root) || die 'Cannot find a protected writable /run or /tmp without noexec for the private mountpoint.'
+command -v mount >/dev/null && command -v umount >/dev/null &&
+    grep -Eq '(^|[[:space:]])squashfs$' "$filesystems" &&
+    { [ -c "$loop_control" ] || [ -b "$loop_zero" ]; } &&
+    awk '/^CapEff:/ {ok=(substr($2,length($2)-5,1) ~ /^[2367abefABEF]$/)} END {exit !ok}' "$cap_status" ||
+    die 'Single-card setup needs kernel SquashFS, a loop device and mount privileges (use the Recalbox root SSH login).'
+awk '$1=="MemAvailable:" && $2>=65536 {ok=1} END {exit !ok}' "$meminfo" ||
+    die 'Less than 64 MiB of available memory for startup. Close other apps and try again.'
+if [ "$action" = setup ]; then
+    LC_ALL=C df -Pk "$base" | awk 'NR==2 && $4 ~ /^[0-9]+$/ && $4>=196608 {ok=1} END {exit !ok}' ||
+        die 'Need at least 192 MiB free on SHARE for the release image.'
+    exit 0
+fi
+digest=$1; image=$2; shift 2
+case $digest in ''|*[!0-9a-f]*) die 'Invalid image checksum.' ;; esac
+[ "${#digest}" = 64 ] || die 'Invalid image checksum length.'
+case $image in
+    "$base/builds/$digest/bundle.squashfs") ;;
+    "$base"/builds/.setup.*/install/bundle.squashfs) [ "$action" = preflight ] || die 'Unexpected staged image.' ;;
+    *) die 'Unexpected single-card image location.' ;;
+esac
+parent=${image%/*}
+[ "$(CDPATH='' cd -P "$parent" && pwd -P)" = "$parent" ] && protected "$parent" d &&
+    protected "${parent%/*}" d && protected "$image" - || die 'Missing, redirected or unsafe single-card image.'
+# Keep the file open across hashing and loop setup; the image remains on SD
+# and the kernel pages it in on demand rather than expanding it in RAM.
+exec 3< "$image"
+source=/proc/$$/fd/3
+actual=$(sha256sum < "$source") || die 'Cannot checksum the persistent image.'
+[ "${actual%% *}" = "$digest" ] || die 'Persistent image failed SHA-256 verification; refusing to mount or launch.'
+[ "$action" != verify ] || exit 0
+private=$(mktemp -d "$root/couchchd.XXXXXX") || die 'Cannot create a private temporary mountpoint.'
+point=$private/app; child=
+cleanup_card() {
+    if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null || :; wait "$child" 2>/dev/null || :; fi
+    if awk -v path="$point" '{mp=$5; gsub(/\\040/," ",mp); if(mp==path) found=1} END {exit !found}' "$mountinfo"; then
+        umount "$point" || { printf 'CouchCHD: Could not unmount %s; close any processes using it.\n' "$point" >&2; return 1; }
+    fi
+    if [ -d "$point" ]; then rmdir "$point" || return 1; fi
+    rmdir "$private"
+}
+trap 'rc=$?; trap - 0; cleanup_card || exit 1; exit "$rc"' 0
+trap 'exit 1' HUP INT TERM
+# Mount beneath a private directory: mounting directly on a mode-0700
+# directory would expose the image root permissions to other local users.
+mkdir "$point"
+if ! mount -t squashfs -o loop,ro,nodev,nosuid "$source" "$point"; then
+    die 'Cannot mount the verified SquashFS image read-only. Check loop device and SquashFS support; no SHARE remount was attempted.'
+fi
+LC_ALL=C awk -v path="$point" '
+    {
+        mp=$5; gsub(/\\040/," ",mp); if (mp!=path) next
+        count++; for(i=7; i<=NF && $i!="-"; i++) {}
+        o="," $6 ","
+        ok=($(i+1)=="squashfs" && o ~ /,ro,/ && o ~ /,nodev,/ && o ~ /,nosuid,/ && o !~ /,noexec,/)
+    } END {exit !(count==1 && ok)}' "$mountinfo" || die 'Image mount did not have the required read-only, nodev, nosuid and executable flags.'
+for exe in "$point/launch-recalbox.sh" "$point/couchchd"; do
+    [ ! -L "$exe" ] && [ -f "$exe" ] && [ -x "$exe" ] || die "Missing or unsafe executable: $exe"
+done
+export COUCHCHD_HOME="$base" COUCHCHD_LAUNCHER="$base/run-couchchd"
+"$point/launch-recalbox.sh" "$@" 3<&- <&0 &
+child=$!
+status=0; wait "$child" || status=$?
+child=
+if [ "$action" = preflight ] && [ "$status" != 0 ]; then
+    die "Verified image could not run --version (status $status). No build activated."
+fi
+exit "$status"
+CARD
+}
+card_call() { card_script | /bin/sh -s -- "$@"; }
 approved_mount() {
     case ${1%/*}:${1##*/} in
         "$media":?*|"$recalbox":share*) ;;
@@ -109,13 +258,20 @@ approved_mount() {
         END { exit !(count == 1 && ok && !nested && !(dev in systemdev)) }
     ' "$mountinfo"
 }
+card_asset=CouchCHD-Recalbox-aarch64.squashfs
+card_candidate() {
+    [ "$frontend:$arch" = recalbox:aarch64 ] && card_call eligible 2>/dev/null
+}
+card_marker() {
+    [ ! -L "$1" ] && [ -f "$1" ] && grep -Fqx '# CouchCHD Recalbox card launcher' "$1"
+}
 recalbox_placement() {
     default=$recalbox/share/system/couchchd
     binding=$recalbox/share/system/.couchchd-install-volume
     install_uid=$(id -u)
     [ "$(CDPATH='' cd -P "$recalbox/share/system" && pwd -P)" = "$recalbox/share/system" ] ||
         fail 'Refusing a redirected Recalbox SHARE.'
-    if [ "$update" = yes ] && [ "$base" = "$default" ]; then return; fi
+    if [ "$update" = yes ] && [ "$base" = "$default" ] && ! card_marker "$base/run-couchchd"; then return; fi
     if [ "$update" = no ]; then
         mkdir "$binding.lock" || fail "Cannot reserve $binding.lock. Check SHARE is writable and another setup is not running."
         placement_lock=$binding.lock
@@ -134,8 +290,18 @@ recalbox_placement() {
         base=$volume/couchchd
         return
     fi
-    [ "$update" = no ] || fail 'Missing Recalbox installation location for this launcher.'
+    if [ "$update" = yes ]; then [ "$base" = "$default" ] || fail 'Missing Recalbox installation location for this launcher.'; fi
     base=$default
+    if card_marker "$base/run-couchchd" || card_candidate; then
+        [ "$arch" = aarch64 ] || fail 'The single-card image requires ARM64.'
+        card_call eligible
+        if [ -e "$base/run-couchchd" ] && ! card_marker "$base/run-couchchd"; then
+            fail 'Refusing to convert an existing launcher to single-card mode.'
+        fi
+        card=yes; asset=$card_asset
+        printf 'CouchCHD: Using single-card Recalbox storage with a verified read-only SquashFS image.\n' >&2
+        return
+    fi
     [ ! -L "$base" ] && [ ! -L "$base/builds" ] || fail 'Refusing symlinked installation directory.'
     if mkdir -p "$base/builds" && stage_on_volume; then return; fi
     if [ -e "$base/run-couchchd" ] || [ -L "$base/run-couchchd" ]; then
@@ -178,11 +344,18 @@ check_build() {
     fi
 }
 check_update_source() {
-    regular_executable "$launcher" && grep -Fqx '# CouchCHD managed launcher' "$launcher" ||
+    if [ "$card" = yes ]; then card_marker "$launcher"; else regular_executable "$launcher"; fi &&
+        grep -Fqx '# CouchCHD managed launcher' "$launcher" ||
         fail 'Updates require an existing managed launcher.'
     installed=$(sed -n 's/^export COUCHCHD_RELEASE_TAG=//p' "$launcher")
     [ -n "$installed" ] || fail 'This is not a managed public release.'
     [ "$installed" = "$expected" ] || fail 'The installed release changed. Close and reopen CouchCHD.'
+    if [ "$card" = yes ]; then
+        previous=$(sed -n 's/^card_digest=//p' "$launcher")
+        valid_digest "$previous" || fail 'The managed card launcher has no valid image target.'
+        card_call verify "$previous" "$base/builds/$previous/bundle.squashfs"
+        return
+    fi
     previous=$(sed -n 's|^exec "\$here/builds/\([0-9a-f]*\)/run" "\$@"$|\1|p' "$launcher")
     valid_digest "$previous" || fail 'The managed launcher has no valid build target.'
     check_build "$base/builds/$previous"
@@ -217,6 +390,7 @@ install() {
     platform
     transport=ssh
     update=no
+    card=no
     case ${1:-} in
         '') [ "$#" = 0 ] || fail 'Empty SSH host.'
             transport=github; release_tag=$channel ;;
@@ -232,6 +406,9 @@ install() {
                 fail 'Missing or redirected installation directory.'
             transport=github; update=yes ;;
         --probe) printf '%s\n' "$arch"; return ;;
+        --probe-asset)
+            if [ ! -e "$recalbox/share/system/.couchchd-install-volume" ] && card_candidate; then asset=$card_asset; fi
+            printf '%s %s\n' "$arch" "$asset"; return ;;
         --receive) [ "$#" = 3 ] && [ "$arch" = "$2" ] || fail 'Build/target architecture mismatch.'; digest=$3; transport=stream ;;
         -*|*[!a-zA-Z0-9.@_-]*) fail 'Usage: install-device.sh [user@build-host [remote-build-directory]]' ;;
         *) host=$1; dir=${2:-couchCHD/dist/release}; [ "$#" -le 2 ] || fail 'Unexpected arguments.'
@@ -278,7 +455,12 @@ install() {
     elif [ -L "$launcher" ] || { [ -e "$launcher" ] && { [ ! -f "$launcher" ] || ! grep -Fqx '# CouchCHD managed launcher' "$launcher"; }; }; then
         fail "Will not replace unmanaged $launcher"
     fi
-    [ -n "$tmp" ] || stage_on_volume || fail 'Could not stage an executable build. No build activated.'
+    if [ "$card" = yes ]; then
+        card_call setup
+        tmp=$(mktemp -d "$base/builds/.setup.XXXXXX")
+    else
+        [ -n "$tmp" ] || stage_on_volume || fail 'Could not stage an executable build. No build activated.'
+    fi
     case $transport in
         github)
             release=https://github.com/vip3rousmango/couchCHD/releases/download/$release_tag
@@ -301,7 +483,15 @@ install() {
     printf 'CouchCHD: Checking that the bundle can run on this device.\n' >&2
     final=$base/builds/$digest
     [ ! -L "$final" ] || fail 'Refusing symlinked build directory.'
-    if [ ! -e "$final" ]; then
+    if [ "$card" = yes ]; then
+        image=$final/bundle.squashfs
+        if [ ! -e "$final" ]; then
+            mkdir "$tmp/install"
+            image=$tmp/install/bundle.squashfs
+            mv "$tmp/download" "$image"
+        fi
+        card_call preflight "$digest" "$image" --version >&2
+    elif [ ! -e "$final" ]; then
         mkdir "$tmp/install"
         if [ "$arch" = x86_64 ]; then
             mv "$tmp/download" "$tmp/install/$asset"; chmod 755 "$tmp/install/$asset"
@@ -358,9 +548,15 @@ if [ -n "${SteamGameId:-}${SteamAppId:-}" ]; then
 fi
 STEAM_LOG
         fi
-        printf '%s\n' "exec \"\$here/builds/${final##*/}/run\" \"\$@\""
+        if [ "$card" = yes ]; then
+            printf '%s\n' '# CouchCHD Recalbox card launcher' "card_digest=$digest" \
+                'set -- launch "$card_digest" "$here/builds/$card_digest/bundle.squashfs" "$@"'
+            card_script
+        else
+            printf '%s\n' "exec \"\$here/builds/${final##*/}/run\" \"\$@\""
+        fi
     } > "$entry"
-    chmod 755 "$entry"
+    if [ "$card" != yes ]; then chmod 755 "$entry"; fi
     if [ -d "$tmp/install" ]; then
         pending=$final
         mv "$tmp/install" "$final"
@@ -378,8 +574,14 @@ STEAM_LOG
     mv -f "$entry" "$launcher" || fail 'Could not switch the launcher; previous installation unchanged.'
     if [ "$update" = yes ]; then return 0; fi
     cleanup; trap - 0 HUP INT TERM
-    printf 'Installed. Relaunch with: %s\n' "$launcher" >&2
-    if ! "$launcher" --register-frontend "$frontend" "$launcher"; then
+    if [ "$card" = yes ]; then
+        set -- /bin/sh "$launcher"
+        printf 'Installed. Relaunch with: /bin/sh %s\n' "$launcher" >&2
+    else
+        set -- "$launcher"
+        printf 'Installed. Relaunch with: %s\n' "$launcher" >&2
+    fi
+    if ! "$@" --register-frontend "$frontend" "$launcher"; then
         printf 'CouchCHD is installed, but menu registration did not finish.\n' >&2
         [ "$frontend" = desktop ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || return 1
     fi

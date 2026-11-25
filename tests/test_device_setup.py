@@ -128,8 +128,7 @@ def recalbox_target(target):
         echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'
         echo "/dev/sda1 2000000 1000000 $available 50% $2"
     ''')
-    if sys.platform == 'darwin':
-        executable(tmp / 'tools/stat', 'exec /usr/bin/stat -f "%u:%Lp" "$3"')
+    executable(tmp / 'tools/stat', 'echo "stat: invalid option" >&2; exit 1')
     executable(tmp / 'tools/chmod', '''
         case $2 in "$SYSTEM"/couchchd/builds/.setup.*/run)
             [ -e allow-default ] || exec /bin/chmod 600 "$2";;
@@ -147,9 +146,9 @@ def recalbox_target(target):
     digest = hashlib.sha256(image.read_bytes()).hexdigest()
     (image.parent / 'SHA256SUMS-x86_64').write_text(f'{digest}  {image.name}\n')
 
-    def install(*args):
+    def install(*args, stdin=None):
         return subprocess.run(['sh', installer, *args], env=dict(env, SYSTEM=str(system)),
-                              cwd=tmp, capture_output=True, text=True, timeout=15)
+                              cwd=tmp, stdin=stdin, capture_output=True, text=True, timeout=15)
 
     return tmp, system, media, mount, install
 
@@ -211,10 +210,10 @@ def test_recalbox_skips_unsafe_unmounted_and_unusable_volumes_before_download(re
     (media / 'alias').symlink_to(tmp)
     mount(media / 'alias')
     # Never chown a real device or require root privileges in this test.
-    stat = tmp / 'tools/stat'
-    original_stat = ('/usr/bin/stat -f "%u:%Lp" "$3"' if sys.platform == 'darwin'
-                     else '/usr/bin/stat "$@"')
-    executable(stat, f'case "$3" in */foreign-owner) echo 999999:755;; *) exec {original_stat};; esac')
+    executable(tmp / 'tools/ls', '''
+        case "$2" in */foreign-owner) echo "drwxr-xr-x 1 999999 999999 0 Jan 1 1970 $2";;
+            *) exec /bin/ls "$@";; esac
+    ''')
     result = install()
     assert result.returncode and 'No safe executable persistent data volume' in result.stderr
     assert 'Downloading' not in result.stderr and not (tmp / 'registration').exists()
@@ -245,3 +244,152 @@ def test_recalbox_refuses_to_move_existing_default(recalbox_target):
     result = install()
     assert result.returncode and 'refusing to move' in result.stderr
     assert launcher.read_bytes() == previous and not (alternate / 'couchchd').exists()
+
+
+@pytest.fixture
+def card_target(recalbox_target, target):
+    tmp, system, _, mount, install = recalbox_target
+    _, env, _, _ = target
+    runtime = tmp / 'run'
+    runtime.mkdir(mode=0o700)
+    mount(runtime, device='0:2', source='tmpfs', fs='tmpfs')
+    mount(system.parent, source='/dev/mmcblk0p3', fs='exfat', flags='rw,fmask=0133,dmask=0022')
+    for name, value in [('meminfo', 'MemAvailable: 500000 kB\n'), ('filesystems', '\tsquashfs\n'),
+                        ('status', 'CapEff:\t0000000000200000\n')]:
+        (tmp / name).write_text(value)
+    script = tmp / 'installer'
+    body = script.read_text()
+    for old, new in [("temp_roots='/run /tmp'", 'temp_roots=' + shlex.quote(str(runtime))),
+                     ('meminfo=/proc/meminfo', 'meminfo=' + shlex.quote(str(tmp / 'meminfo'))),
+                     ('filesystems=/proc/filesystems', 'filesystems=' + shlex.quote(str(tmp / 'filesystems'))),
+                     ('cap_status=/proc/self/status', 'cap_status=' + shlex.quote(str(tmp / 'status'))),
+                     ('loop_control=/dev/loop-control', 'loop_control=/dev/null')]:
+        body = body.replace(old + '\n', new + '\n')
+    if sys.platform != 'linux':  # Only Linux has the procfs open-file interface.
+        body = body.replace('source=/proc/$$/fd/3\n', 'source=$image\n')
+    script.write_text(body)
+    tools = tmp / 'tools'
+    executable(tools / 'uname', 'case $1 in -s) echo Linux;; -m) echo aarch64;; esac')
+    executable(tools / 'curl', '''
+        dest=/dev/stdout
+        while [ "$#" -gt 1 ]; do
+            if [ "$1" = -o ]; then dest=$2; shift; fi
+            shift
+        done
+        echo "$1" >> requests
+        cat "artifacts/aarch64/${1##*/}" > "$dest"
+    ''')
+    # The native ARM workflow mounts the actual SquashFS. Here model only
+    # the privileged kernel boundary, not the checksum, pointer or runner.
+    executable(tools / 'mount', '''
+        set -eu
+        [ "$#" = 6 ] && [ "$1 $2 $3 $4" = '-t squashfs -o loop,ro,nodev,nosuid' ] || exit 1
+        [ "$(ls -nd "${6%/*}" | cut -c1-10)" = drwx------ ] || exit 1
+        [ ! -e reject-mount ] || exit 1
+        cat "$5" > "$6/launch-recalbox.sh"
+        cp "$6/launch-recalbox.sh" "$6/couchchd"
+        chmod 755 "$6/launch-recalbox.sh" "$6/couchchd"
+        echo "99 10 7:0 / $6 ro,nodev,nosuid - squashfs /dev/loop0 ro" >> mountinfo
+        echo mounted >> mounts-log
+    ''')
+    executable(tools / 'umount', '''
+        set -eu
+        rm "$1/launch-recalbox.sh" "$1/couchchd"
+        awk -v p="$1" '$5 != p' mountinfo > mountinfo.new
+        mv mountinfo.new mountinfo
+    ''')
+    image = tmp / 'artifacts/aarch64/CouchCHD-Recalbox-aarch64.squashfs'
+    image.parent.mkdir()
+    def publish(label):
+        executable(image, f'''
+            case "$1" in
+              --version) echo {label};;
+              --register-frontend) [ "$2" = recalbox ] && printf '%s\\n' "$3" >> registration;;
+              --probe) printf '%s\\n' {label} "$COUCHCHD_HOME" "$COUCHCHD_LAUNCHER" "$2";;
+              --fail) exit 37;;
+            esac
+        ''')
+        digest = hashlib.sha256(image.read_bytes()).hexdigest()
+        (image.parent / 'SHA256SUMS-aarch64').write_text(f'{digest}  {image.name}\n')
+        return digest
+    publish('first')
+    base = system / 'couchchd'
+    def launch(*args):
+        return subprocess.run(['/bin/sh', base / 'run-couchchd', *args], cwd=tmp, env=env,
+                              capture_output=True, text=True, timeout=15)
+    return tmp, base, install, launch, publish
+
+
+@pytest.mark.parametrize('transport', ['github', 'pull', 'receive'])
+def test_masked_card_registers_and_relaunches_offline(card_target, transport):
+    tmp, base, install, launch, _ = card_target
+    assert install('--probe-asset').stdout.split() == ['aarch64', 'CouchCHD-Recalbox-aarch64.squashfs']
+    if transport == 'receive':
+        image = next((tmp / 'artifacts/aarch64').glob('*.squashfs'))
+        digest = hashlib.sha256(image.read_bytes()).hexdigest()
+        with image.open('rb') as payload:
+            result = install('--receive', 'aarch64', digest, stdin=payload)
+    else:
+        result = install(*(['host', 'artifacts'] if transport == 'pull' else []))
+    assert result.returncode == 0, result.stderr
+    launcher = base / 'run-couchchd'
+    assert not os.access(launcher, os.X_OK)
+    assert (tmp / 'registration').read_text().splitlines() == [str(launcher)]
+    assert not (base.parent / '.couchchd-install-volume').exists()
+    assert not list((base / 'builds').rglob('couchchd'))
+    (tmp / 'artifacts').rename(tmp / 'offline')
+    result = launch('--probe', 'path with space')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ['first', str(base), str(launcher), 'path with space']
+    assert launch('--fail').returncode == 37
+    assert not list((tmp / 'run').iterdir())
+
+
+@pytest.mark.parametrize('unsafe', ['checksum', 'image-link', 'build-link', 'noexec', 'nested',
+                                    'writable-system', 'writable-file', 'no-privilege', 'low-memory', 'runtime-noexec'])
+def test_card_rechecks_every_launch_before_mount(card_target, unsafe):
+    tmp, base, install, launch, _ = card_target
+    result = install()
+    assert result.returncode == 0, result.stderr
+    before = (tmp / 'mounts-log').read_bytes()
+    image = next((base / 'builds').glob('*/bundle.squashfs'))
+    mounts = tmp / 'mountinfo'
+    if unsafe == 'checksum':
+        image.write_bytes(b'changed')
+    elif unsafe in ('image-link', 'build-link'):
+        path = image if unsafe == 'image-link' else image.parent
+        real = path.rename(path.with_name('real'))
+        path.symlink_to(real)
+    elif unsafe == 'noexec':
+        mounts.write_text(mounts.read_text().replace('rw,fmask=', 'rw,noexec,fmask='))
+    elif unsafe == 'nested':
+        with mounts.open('a') as f:
+            f.write(f'77 10 3:1 / {base}/builds rw - ext4 /dev/other rw\n')
+    elif unsafe == 'writable-system':
+        base.parent.chmod(0o777)
+    elif unsafe == 'writable-file':
+        image.chmod(0o666)
+    elif unsafe == 'no-privilege':
+        (tmp / 'status').write_text('CapEff:\t0000000000000000\n')
+    elif unsafe == 'runtime-noexec':
+        mounts.write_text(mounts.read_text().replace('rw - tmpfs', 'rw,noexec - tmpfs'))
+    else:
+        (tmp / 'meminfo').write_text('MemAvailable: 4096 kB\n')
+    assert launch('--version').returncode != 0
+    assert (tmp / 'mounts-log').read_bytes() == before
+    assert not list((tmp / 'run').iterdir())
+
+
+@pytest.mark.parametrize('problem', ['no-space', 'noexec', 'no-squashfs'])
+def test_card_preflight_rejects_unsupported_setup_before_download(card_target, problem):
+    tmp, base, install, _, _ = card_target
+    if problem == 'no-space':
+        executable(tmp / 'tools/df', 'echo header; echo "/dev/mmcblk0p3 2000000 1990000 10000 99% SHARE"')
+    elif problem == 'noexec':
+        info = tmp / 'mountinfo'
+        info.write_text(info.read_text().replace('rw,fmask=', 'rw,noexec,fmask='))
+    else:
+        (tmp / 'filesystems').write_text('\text4\n')
+    result = install()
+    assert result.returncode != 0 and not (tmp / 'requests').exists()
+    assert not (base / 'run-couchchd').exists() and not list((tmp / 'run').iterdir())
