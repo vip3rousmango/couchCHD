@@ -15,7 +15,7 @@ from .. import cloud_ingest, profiles
 from . import steam
 
 SYSTEMS = {'psx': 'PlayStation', 'segacd': 'Sega CD', 'saturn': 'Sega Saturn', 'dreamcast': 'Dreamcast', 'ps2': 'PlayStation 2', 'psp': 'PSP'}
-PRESETS = {'silent': 'Handheld Silent · 50%', 'balanced': 'Balanced · 75%', 'docked': 'Docked Max · 100%'}
+PRESETS = {'silent': 'Handheld Silent', 'balanced': 'Balanced', 'docked': 'Docked Max'}
 TITLES = ['Dashboard', 'Systems', 'Multi-disc & M3U', 'Cloud ingest', 'History & backups']
 
 
@@ -586,7 +586,7 @@ class Bridge(QObject):
         if key == 'system':
             self.enabled_systems.symmetric_difference_update([arg])
             return self._draw(False)
-        if key == 'presets': return self._show('presets', 'Thermal profile', 'Power and temperature safeguards still apply.', [row('preset', label, '', 'Current' if self.preset == p else '', p) for p, label in PRESETS.items()])
+        if key == 'presets': return self._show('presets', 'Thermal profile', 'Deck and Pi keep a device CPU limit, even when docked. Silent requests fewer workers.', [row('preset', label, '', 'Current' if self.preset == p else '', p) for p, label in PRESETS.items()])
         if key == 'preset':
             self.preset = arg
             self.prefs.setValue('preset', arg)

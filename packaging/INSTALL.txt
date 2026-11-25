@@ -11,6 +11,10 @@ Leave forced compatibility (Proton) off; this is a native Linux application.
 Do not add a raw AppImage or an extracted AppRun as the installed shortcut.
 Use the Gamepad with Joystick Trackpad Steam Input layout.
 
+Public managed installs (preview.4 and later): while idle, open Settings >
+Update CouchCHD. The new verified build starts on your next normal launch.
+Source, standalone and private installs are not switched to the public channel.
+
 Recalbox (64-bit userspace, glibc 2.36+, writable executable SHARE):
 Use scripts/install-device.sh for a persistent EmulationStation entry. When
 ready, press START > QUIT > RESTART RECALBOX. Open Ports > CouchCHD. If Ports

@@ -28,8 +28,10 @@ jobs:
             trap "kill $pid 2>/dev/null || :; cat \"$RUNNER_TEMP/window.log\"" EXIT
             timeout 60 xdotool search --sync --onlyvisible --name "^CouchCHD"
           '
-      - name: Stage the unmodified installer
-        run: install -Dm644 scripts/install-device.sh public/i
+      - name: Stage the installer and its tested release tag
+        run: |
+          install -Dm644 scripts/install-device.sh public/i
+          sh scripts/install-device.sh --channel > public/channel.txt
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: public
