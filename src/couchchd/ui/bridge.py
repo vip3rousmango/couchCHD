@@ -580,12 +580,15 @@ class Bridge(QObject):
         self.sceneChanged.emit(reset)
 
     def _show(self, kind, title, body, rows, *, reset=True):
+        if kind != 'pack_wifi':
+            self.tools.stop_wifi()
         self._modal = {'kind': kind, 'title': str(title), 'body': str(body)}
         self._dialog_rows = rows
         self.changed.emit()
         self.sceneChanged.emit(reset)
 
     def _hide(self):
+        self.tools.stop_wifi()
         self._modal = None
         self._dialog_rows = []
         self._confirm = None
@@ -1025,6 +1028,7 @@ class Bridge(QObject):
         self._settings()
 
     def close(self):
+        self.tools.stop_wifi()
         self._cancel.set()
         self._pool.shutdown(wait=True, cancel_futures=True)
         self.prefs.sync()

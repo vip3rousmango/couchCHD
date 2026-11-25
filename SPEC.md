@@ -73,6 +73,7 @@ Designed for users who store uncompressed ROM archives in cloud storage (e.g., G
    * Budget scratch and destination space separately by filesystem; temporary inputs and output may need to coexist. Retaining a local backup does not reclaim its space.
 3. **Reuse an existing compressed game:** register named mounted libraries or configured rclone sources. Cache last-seen inventories, distinguish offline entries, and pull a selected game or playlist pack without recompression. A match by name is not content identity. Never mirror deletions or overwrite a conflicting destination.
 4. **Handheld destinations:** a controller-selectable firmware/player profile filters export formats and determines the supported folder layout. This is distinct from native execution; unsupported or unknown emulator features must not be implied by a device model.
+5. **First-party Android Wi-Fi handoff:** a foreground sender offers only the selected platform and games. Discovery does not authorize reading. Both devices compare a session code before transfer over pinned TLS; there is no background listener, remote upload or mirror. Android asks for the platform folder, checks existing files before copying and reads back new files before declaring success. The companion does not convert or launch games.
 
 \---
 

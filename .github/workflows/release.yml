@@ -6,6 +6,64 @@ on:
 permissions:
   contents: read
 jobs:
+  receiver:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install Android 12 emulator and build tools
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "platform-tools" "emulator" "system-images;android-31;google_apis;x86_64" >/dev/null
+          sudo chmod a+rw /dev/kvm
+          echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n receiver -k 'system-images;android-31;google_apis;x86_64'
+          nohup "$ANDROID_HOME/emulator/emulator" -avd receiver -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >"$RUNNER_TEMP/emulator.log" 2>&1 </dev/null &
+      - name: Build signed Android companion
+        if: github.event_name == 'push'
+        env:
+          KEYSTORE: ${{ secrets.COUCHCHD_RECEIVE_KEYSTORE }}
+          COUCHCHD_STORE_PASSWORD: ${{ secrets.COUCHCHD_RECEIVE_PASSWORD }}
+        run: |
+          umask 077
+          export COUCHCHD_KEYSTORE="$RUNNER_TEMP/receiver.p12" COUCHCHD_KEY_ALIAS=receiver
+          export COUCHCHD_KEY_PASSWORD="$COUCHCHD_STORE_PASSWORD"
+          trap 'rm -f "$COUCHCHD_KEYSTORE"' EXIT
+          printf %s "$KEYSTORE" | base64 --decode > "$COUCHCHD_KEYSTORE"
+          unset KEYSTORE
+          mkdir -p receiver-release
+          bash android/build.sh "$GITHUB_REF_NAME" "$GITHUB_RUN_NUMBER" receiver-release/CouchCHD-Receive.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs receiver-release/CouchCHD-Receive.apk | grep -Fx 'Signer #1 certificate SHA-256 digest: 9ae07a8e885e055a8351eab33be0163d6b28c8aec851abc19f305b4b0cb4b3a1'
+      - name: Build disposable manual-test companion
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          export COUCHCHD_KEYSTORE="$RUNNER_TEMP/test.p12" COUCHCHD_KEY_ALIAS=test COUCHCHD_STORE_PASSWORD=disposable COUCHCHD_KEY_PASSWORD=disposable
+          keytool -genkeypair -keystore "$COUCHCHD_KEYSTORE" -alias test -keyalg RSA -keysize 2048 -storepass disposable -keypass disposable -dname CN=Test
+          mkdir -p receiver-release
+          bash android/build.sh test "$GITHUB_RUN_NUMBER" receiver-release/CouchCHD-Receive.apk
+      - name: Receive over TLS on Android 12
+        run: |
+          python3 -m venv "$RUNNER_TEMP/wifi"
+          "$RUNNER_TEMP/wifi/bin/pip" install cryptography
+          adb wait-for-device
+          timeout 300 bash -c 'until [[ $(adb shell getprop sys.boot_completed | tr -d "\r") == 1 ]]; do sleep 2; done'
+          adb shell wm size 640x480
+          adb shell wm density 160
+          adb shell input keyevent 82
+          adb install receiver-release/CouchCHD-Receive.apk
+          PYTHONPATH=src "$RUNNER_TEMP/wifi/bin/python" scripts/smoke_android_receive.py
+          (cd receiver-release && sha256sum CouchCHD-Receive.apk > SHA256SUMS-android)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-android
+          path: receiver-release/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: android-receive-screen
+          path: ${{ runner.temp }}/receiver-screen.png
+          if-no-files-found: ignore
   package:
     strategy:
       fail-fast: false
@@ -158,7 +216,7 @@ jobs:
     # Manual dispatch builds artifacts only. Public previews and normal tag drafts
     # both require all native build, conversion, Qt and installer gates to pass.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [package, recalbox-storage]
+    needs: [package, recalbox-storage, receiver]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -170,12 +228,13 @@ jobs:
           pattern: release-*
           path: assets
           merge-multiple: true
-      - name: Verify both architecture manifests before combining
+      - name: Verify native and receiver manifests before combining
         working-directory: assets
         run: |
           sha256sum --check SHA256SUMS-x86_64
           sha256sum --check SHA256SUMS-aarch64
-          cat SHA256SUMS-x86_64 SHA256SUMS-aarch64 > SHA256SUMS
+          sha256sum --check SHA256SUMS-android
+          cat SHA256SUMS-x86_64 SHA256SUMS-aarch64 SHA256SUMS-android > SHA256SUMS
       - name: Attest release checksums on public GitHub
         if: github.event.repository.private == false
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
@@ -200,6 +259,8 @@ jobs:
           Hardware testing build, not device certification. Back up your library and test with disposable copies first.
 
           Format support includes CHD, PSP CSO, Dolphin RVZ, original Xbox XISO, CARD1 3DS trimming, and single-ROM 7z for supported cartridge cores. XISO and trimmed 3DS always retain the original. Test emulator playback and existing saves before clearing any recoverable originals.
+
+          New: send selected games over home Wi-Fi to CouchCHD Receive, the signed Android companion. No file share, third-party sync app or card reader is needed. Compare the pairing codes before approving. Select the actual game folder on the handheld and wait for verification before rescanning in your launcher.
 
           New library workflows: preview a space goal, check library health without editing ROMs, mark verified outputs after playing and reclaim only reviewed backups. Export complete RG405M playlists or pull an existing compressed game from a named mounted/rclone library without recompression or overwriting conflicting games. Mixed loose-disc and supported ZIP libraries process one archive at a time; PSP ZIP-to-CSO streams without writing an intermediate ISO. Original ZIPs are always retained.
 

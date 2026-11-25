@@ -2,7 +2,7 @@
 # No arguments: install the pinned GitHub release. SSH transports are optional.
 set -eu
 umask 077
-channel=v0.1.0-preview.16
+channel=v0.1.0-preview.17
 recalbox=/recalbox
 media=/media
 mountinfo=/proc/self/mountinfo
@@ -394,7 +394,7 @@ device_report() {
 platform() {
     [ "$(uname -s)" = Linux ] || fail 'A Linux target is required.'
     if command -v getprop >/dev/null 2>&1 && [ -n "$(getprop ro.build.version.sdk 2>/dev/null)" ]; then
-        fail 'Android is a handheld export destination, not a native Linux install target. Use CouchCHD on your host.'
+        fail 'Android is a handheld export destination. Open https://vip3rousmango.github.io/couchCHD/receive/ on the handheld to get CouchCHD Receive.'
     fi
     arch=$(uname -m)
     case $arch in

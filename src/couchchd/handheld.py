@@ -295,11 +295,18 @@ def _targets(chosen, layout, srcfd):
     return targets
 
 
-def _read_source(source, path, out=None):
+def _read_source(source, path, out=None, *, check=None):
     digest = hashlib.sha256()
     total = 0
+    if check is not None:
+        check()
     with source.stream() as stream:
-        while chunk := stream.read(1024 * 1024):
+        while True:
+            if check is not None:
+                check()
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
             total += len(chunk)
             if total > source.size:
                 raise SafetyError(f'Source exceeded declared size: {path}')
@@ -372,7 +379,7 @@ def publish_pack(dest, files: Mapping[Path, PackSource], *, check: Callable[[], 
         return _publish(fd, files, check)
 
 
-def _publish(destfd, files, check):
+def _ordered_targets(files):
     targets = []
     spellings = {}
     for key, source in files.items():
@@ -390,7 +397,11 @@ def _publish(destfd, files, check):
     paths = {path for path, _ in targets}
     if len(paths) != len(targets) or any(parent in paths for path in paths for parent in path.parents):
         raise SafetyError('Two selected files claim the same path as a file or directory.')
-    targets.sort(key=lambda pair: pair[0].suffix.lower() == '.m3u')
+    return sorted(targets, key=lambda pair: pair[0].suffix.lower() == '.m3u')
+
+
+def _publish(destfd, files, check):
+    targets = _ordered_targets(files)
     existing = _preflight(targets, destfd)
     pending = [(p, f) for p, f in targets if p not in existing]
     size = sum(f.size for _, f in pending)
@@ -436,17 +447,51 @@ def _publish(destfd, files, check):
     return dict(copied=copied, skipped=[p.as_posix() for p in existing], bytes=size)
 
 
+def _selection_keys(selected):
+    if isinstance(selected, (str, Path)):
+        selected = [selected]
+    keys = list(dict.fromkeys(safe_relative_name(os.fspath(k)).as_posix() for k in selected))
+    if not keys:
+        raise SafetyError('Select at least one game to export.')
+    return keys
+
+
+def _selected_entries(root, srcfd, formats, keys):
+    catalog = _catalog(root, srcfd, formats, set(keys))
+    for key in keys:
+        if key not in catalog:
+            raise SafetyError(f'Not a complete playable export entry: {key}')
+    return [catalog[k] for k in keys]
+
+
+@contextmanager
+def platform_sources(root, selected, profile, *, players=None):
+    """Pin the root and snapshot a single platform, using the same path rules as card export."""
+    _, formats = resolve_profile(profile, players)
+    root = safe_absolute(root)
+    keys = _selection_keys(selected)
+    systems = set()
+    for key in keys:
+        folder = system_folder(root, root / key)
+        system = _system(folder.name) if folder is not None else None
+        if system not in formats:
+            raise SafetyError(f'Not a complete playable export entry: {key}')
+        systems.add(system)
+    if len(systems) != 1:
+        raise SafetyError('Send one platform at a time to its game folder.')
+    system, = systems
+    with open_directory(root) as fd:
+        entries = _selected_entries(root, fd, {system: formats[system]}, keys)
+        yield system, _ordered_targets(_targets(entries, {system: Path('.')}, fd))
+
+
 def export(root, selected, dest, profile=DEFAULT_PROFILE, *, players=None, expected_destination=None) -> dict:
     """Hash both sides. Never replace files; publish complete images first, then their playlists."""
     profile, formats = resolve_profile(profile, players)
     root, dest = safe_absolute(root), safe_absolute(dest)
     if dest.is_relative_to(root) or root.is_relative_to(dest):
         raise SafetyError('Source and destination directories must not overlap.')
-    if isinstance(selected, (str, Path)):
-        selected = [selected]
-    keys = list(dict.fromkeys(safe_relative_name(os.fspath(k)).as_posix() for k in selected))
-    if not keys:
-        raise SafetyError('Select at least one game to export.')
+    keys = _selection_keys(selected)
     with open_directory(root) as srcfd, open_directory(dest) as destfd:
         if expected_destination is not None:
             pinned = os.fstat(destfd)
@@ -454,11 +499,7 @@ def export(root, selected, dest, profile=DEFAULT_PROFILE, *, players=None, expec
                 raise SafetyError('The selected destination changed. Choose the mounted game folder again.')
         if _has_ancestor(srcfd, destfd) or _has_ancestor(destfd, srcfd):
             raise SafetyError('Source and destination directories must not overlap.')
-        catalog = _catalog(root, srcfd, formats, set(keys))
-        for key in keys:
-            if key not in catalog:
-                raise SafetyError(f'Not a complete playable export entry: {key}')
-        chosen = [catalog[k] for k in keys]
+        chosen = _selected_entries(root, srcfd, formats, keys)
         targets = _targets(chosen, _layout(dest, destfd, {e.system for e in chosen}, profile), srcfd)
 
         def recheck():

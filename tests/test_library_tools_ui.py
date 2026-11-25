@@ -1,7 +1,7 @@
 """Exercise the worker-backed library workflows using only controller row actions."""
 import os
 from pathlib import Path
-from threading import Event
+from threading import Event, get_ident
 import time
 from zipfile import ZipFile
 
@@ -173,6 +173,106 @@ def test_browse_external_source_check_and_copy_without_opening_working_library(c
     choose('accept')
     assert state.modal['title'] == 'Operation stopped', state.modal
     assert not list(card.iterdir())
+
+
+@pytest.mark.parametrize('leave', ['back', 'exit', 'close'])
+def test_wifi_selection_and_explicit_approval(controller, tmp_path, monkeypatch, leave):
+    from couchchd import wifi_sender
+
+    state, choose, _ = controller
+    library = tmp_path / 'roms'
+    (library / 'psx').mkdir(parents=True)
+    for name in ('Selected', 'Other'):
+        (library / 'psx' / f'{name}.chd').write_bytes(name.encode())
+    gui_thread = get_ident()
+    calls = []
+    approved, stopped = Event(), Event()
+    firewall_allowed, firewall_closed = Event(), Event()
+
+    class Firewall:
+        network = '192.168.1.0/24'
+
+        def allow(self, stop):
+            assert get_ident() != gui_thread
+            firewall_allowed.set()
+            return True
+
+        def close(self):
+            firewall_closed.set()
+
+    monkeypatch.setattr('couchchd.ui.library_tools.HomeFirewall.discover', lambda _: Firewall())
+
+    class Session:
+        address = '192.168.1.11:42000'
+        pair_code = ''
+        status = 'Waiting for receiver'
+        closed = False
+
+        def approve(self):
+            assert get_ident() != gui_thread
+            approved.set()
+
+        def close(self):
+            assert get_ident() != gui_thread
+            stopped.set()
+
+    session = Session()
+
+    def start(root, selected, profile, *, players, cancel):
+        assert cancel is state.tools._wifi_stop and not cancel.is_set()
+        assert get_ident() != gui_thread
+        calls.append((root, selected, profile, players))
+        return session
+
+    def until(condition):
+        deadline = time.monotonic() + 5
+        while not condition() and time.monotonic() < deadline:
+            QCoreApplication.processEvents()
+            time.sleep(.005)
+        assert condition()
+
+    monkeypatch.setattr(wifi_sender, 'start_sender', start)
+    state.candidates = [library]
+    state._draw(True)
+    choose('tool_export')
+    choose('tool_profiles')
+    choose('tool_profile_set', 'android-t618')
+    choose('tool_players')
+    choose('tool_player_toggle', 'pcsx-rearmed')
+    choose('back')
+    choose('tool_export_browse')
+    choose('browse', library)
+    choose('use_dir')
+    assert not any(r['key'] == 'tool_wifi' for r in state.modalRows)
+    choose('tool_pack_toggle', 'psx/Selected.chd')
+    assert not calls
+    choose('tool_wifi')
+    until(lambda: session.address in state.modal['body'])
+    assert calls == [(library, ('psx/Selected.chd',), 'android-t618', ('pcsx-rearmed',))]
+    assert any('couchCHD/receive' in r['detail'] for r in state.modalRows)
+    until(lambda: any(r['key'] == 'tool_wifi_firewall' for r in state.modalRows))
+    assert not firewall_allowed.is_set()
+    if leave == 'back':
+        choose('tool_wifi_firewall')
+        until(firewall_allowed.is_set)
+    assert not any(r['key'] == 'tool_wifi_approve' for r in state.modalRows)
+    session.pair_code = '1234-5678-9abc'
+    until(lambda: session.pair_code in state.modal['body'])
+    assert not approved.is_set() and state.modalRows[0]['key'] == 'back'
+    if leave != 'exit':
+        choose('tool_wifi_approve', session.pair_code)
+        until(approved.is_set)
+    if leave == 'back':
+        choose('back')
+        assert state.modal['kind'] == 'pack_games' and state.tools.selected == {'psx/Selected.chd'}
+    elif leave == 'exit':
+        state.exitPrompt()
+        assert state.modal['kind'] == 'confirm' and not approved.is_set()
+    else:
+        state.close()
+    until(stopped.is_set)
+    until(firewall_closed.is_set)
+    assert firewall_allowed.is_set() == (leave == 'back')
 
 
 def test_platform_profile_limits_players_formats_and_destination(controller, tmp_path):

@@ -12,7 +12,7 @@ curl -f https://vip3rousmango.github.io/couchCHD/i | sh
 
 This runs code from this repository as your current user. To inspect it first, download the script to a file, read it, then run `sh install-device.sh`. Don't use `sudo` on the Deck. No build machine, clone, Python installation, or GitHub login is required on the target.
 
-The installer selects the x86-64 AppImage, aarch64 tarball or single-card Recalbox image from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.16), verifies SHA-256 against the release manifest, and runs `--version` before activating it. Both architectures require **64-bit Linux userspace, glibc 2.36+**, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported.
+The installer selects the x86-64 AppImage, aarch64 tarball or single-card Recalbox image from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.17), verifies SHA-256 against the release manifest, and runs `--version` before activating it. Both architectures require **64-bit Linux userspace, glibc 2.36+**, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported.
 
 Desktop Linux gets an Applications menu entry and launches immediately if a graphical display is available. On appliances the installer registers the launcher, tells you how to refresh the menu, and leaves the current frontend running. Setup does not convert or purge anything.
 
@@ -80,13 +80,23 @@ The report does not scan ROMs, change files, or upload anything. If there's no s
 
 **You can play the converted discs without installing CouchCHD on the handheld.** The stock [RG405M](https://anbernic.com/products/rg405m) has a 64-bit T618 and Android 12. Neither the Linux AppImage nor the glibc-based Recalbox ARM bundle is an Android app. Don't run the Linux installer on the RG405M or add its shell script as a Daijishō player.
 
+**Leave the SD card in the handheld.** On your RG405M, open [Get CouchCHD Receive](https://vip3rousmango.github.io/couchCHD/receive/), install our Android companion, and join the same home network as your Deck or Bazzite PC. There is no account, Samba share, or third-party sync app to configure.
+
+1. On the computer open **Dashboard → Sync to handheld**, choose an Android profile, select games from **one platform**, and choose **Send over Wi-Fi**.
+2. On the handheld open **CouchCHD Receive** and find the computer. Compare the code on both screens before approving; if they differ, cancel. Use the app’s manual address option if the host does not appear. Don’t forward ports on your router.
+3. When Android asks where games go, open the same game folder Daijishō uses for that platform (for example `ROMs/PSP`, not the entire card), then choose **Use this folder → Receive files**. Keep both apps open. A new filename can appear before the copy is ready; wait for **Transfer complete**, then choose **Sync** in Daijishō.
+
+If discovery fails on Bazzite, choose **Allow on home network** in the sender if offered, then **Find sender** again. This is a temporary permission for your local network, not a router change. Guest Wi-Fi may isolate devices even if they have the same network name.
+
+The receiver remembers the folder, skips byte-identical games and stops on conflicting copies. This sends only the games you choose; it does not mirror deletions or copy saves, BIOS files, or settings. To use a card reader instead:
+
 1. On Bazzite, a Steam Deck, or a remote supported Linux host, copy one game into a working ROM library (for example, `roms/psx/` with its `.cue` **and all referenced tracks**). Convert there with **Keep originals** or the [`--keep-originals` CLI example](#run-from-source). Wait for verification.
 2. Choose **Handheld export**, select the titles, and point it at the mounted card's ROMs folder. CouchCHD copies supported PSX/Dreamcast CHDs, complete CHD playlists or PSP CHD/CSO, checks the copied bytes, skips identical files, and refuses conflicting copies. For MTP-only USB transfer, export to a local folder first, then transfer its contents yourself; that final manual copy is not verified by CouchCHD. Keep the master library until you've tested booting and changing discs.
 3. In Daijishō highlight the platform, choose **Add more → Select folder → Sync** (just **Sync** if the folder is already registered). Choose a [player that accepts the output](https://github.com/TapiocaFox/Daijishou/wiki/Players-and-File-Extensions). For PS1, [Beetle PSX](https://docs.libretro.com/library/beetle_psx/#chd) supports CHD and M3U; launch the playlist for disc swapping. For GameCube/Wii, [Dolphin recommends RVZ](https://dolphin-emu.org/docs/faq/#supported-dump-formats), not this CHD workflow. Changing a [player's filename filter](https://github.com/TapiocaFox/Daijishou/wiki/How-to-Use-Daijish%C5%8D) can make a game visible but can't teach the emulator a new format.
 
 For your PSP batch, select a current [PPSSPP](https://www.ppsspp.org/docs/getting-started/dumping-games/) build: CHD support starts at 1.17, and CouchCHD uses its recommended DVD image mode for PSP ISOs. Smoke-test a game in the chosen emulator before removing sources; a valid checksum does not prove that the installed player supports the image.
 
-**Converting on the RG405M itself would need a port.** A signed APK with a normal launcher activity could open from Daijishō's **Apps** tab or its [pin-apps widget](https://github.com/TapiocaFox/Daijishou/releases/tag/v1.3.0); neither shortcut runs Linux software. The APK would need to package the converter for Android's [`arm64-v8a` ABI](https://developer.android.com/ndk/guides/abis) (for example, chdman code built as a native library), not download and execute a helper from [writable app storage](https://developer.android.com/about/versions/10/behavior-changes-10#execute-permission). It would also need its **own** [Storage Access Framework folder grant](https://developer.android.com/training/data-storage/shared/documents-files#grant-access-directory) for a user-selected ROM subfolder, not a hard-coded SD path or Daijishō's permissions. Handling document URIs, resolving sibling tracks and safely verifying output before touching originals would need testing on actual hardware. No CouchCHD APK or tested on-device conversion is available.
+The companion receives games; it does not convert them or replace an emulator. You can open it from Daijishō's **Apps** tab or [pin-apps widget](https://github.com/TapiocaFox/Daijishou/releases/tag/v1.3.0). Android gives each app its own [folder permission](https://developer.android.com/training/data-storage/shared/documents-files#grant-access-directory); selecting a folder for the receiver does not change Daijishō's library paths.
 
 ## Optional: private SSH builds
 
@@ -148,7 +158,7 @@ For a read-only NTFS collection on Bazzite, use **mounted-folder ingest** into a
 
 In **NAS / Cloud**, add named libraries: for example, the Deck's ROM folder, the Bazzite-mounted NTFS library, and the RG405M card while it is in a reader. Choose **Refresh**, browse the compressed inventory, then select a specific location and pull into a writable ROM library. A disconnected source keeps its last-seen inventory; it must be reachable to transfer. Matching paths identify possible copies, **not** identical discs or regions.
 
-Sources can be existing mounted directories (local, SMB, NFS, SSHFS) or **already configured** rclone remotes, including SFTP. For SFTP, verify the peer's SSH host key and configure rclone's `known_hosts_file`. A Pi without rclone can use an OS-mounted share. No CouchCHD listener, automatic device enrollment, background mirror or delete propagation. Each receiver remembers the libraries you add to it. An Android card in a reader is a source; Daijishō is not a network service.
+Sources can be existing mounted directories (local, SMB, NFS, SSHFS) or **already configured** rclone remotes, including SFTP. For SFTP, verify the peer's SSH host key and configure rclone's `known_hosts_file`. A Pi without rclone can use an OS-mounted share. The catalog has no listener, automatic device enrollment, background mirror or delete propagation. The separate **Send over Wi-Fi** action opens a temporary sender for an explicitly selected Android pack.
 
 ```sh
 couchchd --catalog-add 'Deck' deck:/home/deck/Emulation/roms

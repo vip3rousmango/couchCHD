@@ -2,6 +2,12 @@
 import json
 import os
 from pathlib import Path
+from queue import SimpleQueue
+from threading import Event, Thread
+
+from PySide6.QtCore import QTimer
+
+from .wifi_firewall import HomeFirewall
 
 from .. import handheld, handheld_profiles, hardware, scanner
 from ..app import Backend
@@ -29,6 +35,10 @@ class LibraryTools:
         self.profile = self.profiles.get(saved, self.profiles[handheld_profiles.DEFAULT_PROFILE])
         self._load_profile_settings()
         self.repeat_note = ''
+        self._wifi_stop = None
+        self._wifi_timer = QTimer(bridge)
+        self._wifi_timer.setInterval(200)
+        self._wifi_timer.timeout.connect(self._refresh_wifi)
 
     def _pref(self, name):
         return f"handheld/{self.profile['id']}/{name}"
@@ -178,6 +188,14 @@ class LibraryTools:
             return self.show_pack(False)
         if key == 'tool_pack_dest':
             return ui._pick('export_dest')
+        if key == 'tool_wifi':
+            return self._start_wifi()
+        if key == 'tool_wifi_approve':
+            self._wifi_commands.put(arg)
+            return
+        if key == 'tool_wifi_firewall':
+            self._wifi_allow.set()
+            return
         if key == 'tool_review':
             return self._load_reviews(arg)
         if key == 'tool_disc':
@@ -207,7 +225,7 @@ class LibraryTools:
             self.ui._hide()
         elif kind in ('pack_profiles', 'pack_players', 'pack_info', 'pack_system'):
             self._source_menu('export')
-        elif kind in ('pack_filter', 'pack_changed'):
+        elif kind in ('pack_filter', 'pack_changed', 'pack_wifi'):
             self.show_pack()
         elif kind == 'pack_games':
             self._source_menu('export')
@@ -272,7 +290,9 @@ class LibraryTools:
                     rows.append(row('tool_export_here', 'Use current library', self.ui.location))
                 rows.append(row('tool_export_browse', 'Browse a source folder', 'Mounted library or system folder.'))
             rows.append(row('tool_profile_info', 'About this profile', 'Folder layout, evidence and playback checks.'))
-            body = ('Choose games, then confirm the connected card. This copies files; it does not install an app.'
+            body = (('Choose games, then send over Wi-Fi or copy to a connected card.'
+                     if self.profile['id'] == 'android-t618' else
+                     'Choose games, then confirm the connected card. This copies files; it does not install an app.')
                     if self.players else 'No player selected. Choose the emulator installed on your handheld to see eligible games.')
             return self.ui._show('export_source', 'Sync to handheld', body, rows)
         rows = []
@@ -356,6 +376,9 @@ class LibraryTools:
             else:
                 # Keep game and bulk rows in place when the first title is selected with a controller.
                 rows.append(row('note', 'Select games below', 'Then choose where to copy them.'))
+            if self.profile['id'] == 'android-t618':
+                rows.append(row('tool_wifi' if self.selected else 'note', 'Send over Wi-Fi',
+                                'Receive on Android without removing the SD card.' if self.selected else 'Select a game first.'))
             if len(self.catalog_systems) > 1:
                 rows.append(row('tool_filter', 'Change system' if self._platform_folder else 'Show games', '',
                                 scanner.SYSTEM_LABELS.get(self.filter, 'All systems')))
@@ -372,6 +395,116 @@ class LibraryTools:
             rows += [row('note', p['label'], self._formats(p['systems']))
                      for p in self.profile['players'] if p['id'] in self.players]
         self.ui._show('pack_games', 'Choose games', body, rows, reset=reset)
+
+    def _start_wifi(self):
+        root, profile = self.origin.root, self.profile['id']
+        selected, players = tuple(sorted(self.selected)), tuple(sorted(self.players))
+        stop = self._wifi_stop = Event()
+        updates = self._wifi_updates = SimpleQueue()
+        allow = self._wifi_allow = Event()
+        firewall_updates = SimpleQueue()
+        commands = self._wifi_commands = SimpleQueue()
+        self._wifi_screen('', '', 'Preparing selected files…', '', '', reset=True)
+
+        def manage_firewall(address):
+            firewall = HomeFirewall.discover(address)
+            if firewall is None:
+                return
+            try:
+                firewall_updates.put((str(firewall.network), ''))
+                while not stop.is_set():
+                    if allow.wait(.2):
+                        if stop.is_set():
+                            return
+                        firewall_updates.put(('', 'Waiting for firewall permission…'))
+                        allowed = firewall.allow(stop)
+                        firewall_updates.put(('', 'Home network allowed for up to 10 minutes.' if allowed else
+                                              'Firewall permission denied. Check your host firewall or use a connected card.'))
+                        stop.wait()
+                        return
+            finally:
+                firewall.close()
+
+        def serve():
+            session = None
+            firewall_thread = None
+            try:
+                if stop.is_set():
+                    return
+                from ..wifi_sender import start_sender
+                session = start_sender(root, selected, profile, players=players, cancel=stop)
+                firewall_thread = Thread(target=manage_firewall, args=(session.address,), name='wifi-firewall')
+                firewall_thread.start()
+                network, firewall_note = '', ''
+                previous = None
+                approved = False
+                while not stop.is_set():
+                    while not commands.empty():
+                        code = commands.get()
+                        if code and code == session.pair_code and not approved:
+                            session.approve()
+                            approved = True
+                    while not firewall_updates.empty():
+                        network, firewall_note = firewall_updates.get()
+                    closed = session.closed
+                    current = ('' if closed else session.address, '' if approved or closed else session.pair_code,
+                               session.status, '' if closed else network, '' if closed else firewall_note)
+                    if current != previous:
+                        updates.put(current)
+                        previous = current
+                    if closed:
+                        break
+                    stop.wait(.2)
+            except Exception as exc:
+                updates.put(('', '', f'Cannot send: {exc}. Go back to try again.', '', ''))
+            finally:
+                stop.set()
+                if session is not None:
+                    session.close()
+                if firewall_thread is not None:
+                    firewall_thread.join()
+
+        self.ui._pool.submit(serve)
+        self._wifi_timer.start()
+
+    def _refresh_wifi(self):
+        if self._wifi_stop is None:
+            return
+        latest = None
+        while not self._wifi_updates.empty():
+            latest = self._wifi_updates.get()
+        if latest is not None:
+            self._wifi_screen(*latest, reset=False)
+
+    def _wifi_screen(self, address, code, status, network, firewall_note, *, reset):
+        system = scanner.SYSTEM_LABELS[self.filter]
+        rows = [row('back', 'Stop sending and go back')]
+        rows.extend([
+            row('note', '1. Install CouchCHD Receive on Android', 'vip3rousmango.github.io/couchCHD/receive'),
+            row('note', '2. Join the same Wi-Fi and tap Find', 'Open CouchCHD Receive on the handheld.'),
+            row('note', '3. Compare the codes', 'If they match, approve here. If not, stop sending.'),
+            row('note', f'4. Choose your {system} folder on Android', 'Use the existing game folder, not the whole SD card.')])
+        if network:
+            rows.append(row('tool_wifi_firewall', 'Allow on home network',
+                            f'On trusted Wi-Fi only: allow discovery and transfer from {network} for up to 10 minutes.'))
+        elif firewall_note:
+            rows.append(row('note', 'Host firewall', firewall_note))
+        else:
+            rows.append(row('note', 'Can’t find this host?', 'Use home Wi-Fi, not a guest network. Try the host IP in Receive.'))
+        if code:
+            rows.insert(1, row('tool_wifi_approve', f'Approve {code}', 'Only if the same code appears on your handheld.', '', code))
+        body = status
+        if address:
+            body += f'\nHost: {address}'
+        if code:
+            body += f'\nComparison code: {code}'
+        self.ui._show('pack_wifi', 'Send over Wi-Fi', body, rows, reset=reset)
+
+    def stop_wifi(self):
+        if self._wifi_stop is not None:
+            self._wifi_stop.set()
+            self._wifi_timer.stop()
+            self._wifi_stop = None
 
     def export_to(self, dest, *, previous=False):
         origin = self.origin

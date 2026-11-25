@@ -4,6 +4,8 @@ on:
     branches: [main]
     paths:
       - scripts/install-device.sh
+      - packaging/receive.html
+      - src/couchchd/ui/assets/icon.png
       - .github/workflows/installer-url.yml
   workflow_dispatch:
 permissions:
@@ -32,6 +34,14 @@ jobs:
         run: |
           install -Dm644 scripts/install-device.sh public/i
           sh scripts/install-device.sh --channel > public/channel.txt
+          mkdir -p public/receive
+          cp packaging/receive.html public/receive/index.html
+          cp src/couchchd/ui/assets/icon.png public/receive/disc.png
+          tag=$(cat public/channel.txt)
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag"
+          curl --proto '=https' --proto-redir '=https' -fsSL "$base/CouchCHD-Receive.apk" -o public/receive/CouchCHD-Receive.apk
+          curl --proto '=https' --proto-redir '=https' -fsSL "$base/SHA256SUMS" -o "$RUNNER_TEMP/sums"
+          (cd public/receive && grep -E '^[0-9a-f]{64}  CouchCHD-Receive\.apk$' "$RUNNER_TEMP/sums" | sha256sum -c -)
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: public
