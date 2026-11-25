@@ -123,10 +123,9 @@ final class CardStore {
     private static final class Verified {
         final Uri uri; final StructStat stamp;
         Verified(Uri uri, StructStat stamp) { this.uri=uri; this.stamp=stamp; }
-        void requireSame(StructStat now, String path) throws IOException {
-            if (stamp.st_dev!=now.st_dev || stamp.st_ino!=now.st_ino || stamp.st_size!=now.st_size ||
-                    stamp.st_mtime!=now.st_mtime || stamp.st_ctime!=now.st_ctime)
-                throw new IOException("Card file changed during transfer: " + path);
+        boolean matches(StructStat now) {
+            return stamp.st_dev==now.st_dev && stamp.st_ino==now.st_ino && stamp.st_size==now.st_size &&
+                   stamp.st_mtime==now.st_mtime && stamp.st_ctime==now.st_ctime;
         }
     }
     private final Map<String,Verified> verifiedFiles=new HashMap<>();
@@ -136,7 +135,8 @@ final class CardStore {
         try (ParcelFileDescriptor fd=open(uri,"r");
              InputStream in=new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor()))) {
             Verified v=new Verified(uri,Os.fstat(fd.getFileDescriptor()));
-            e.verify(in,list,progress); v.requireSame(Os.fstat(fd.getFileDescriptor()),e.path); verifiedFiles.put(e.path,v);
+            e.verify(in,list,progress);
+            verifiedFiles.put(e.path,v);
         }
         if (list!=null) validatePlaylist(list.toByteArray(),e,offer);
     }
@@ -220,7 +220,12 @@ final class CardStore {
         for (Wire.Entry e : offer.entries) {
             Wire.check(); Verified v=verifiedFiles.get(e.path);
             if (v==null) throw new IOException("Missing verification for " + e.path);
-            try (ParcelFileDescriptor fd=open(v.uri,"r")) { v.requireSame(Os.fstat(fd.getFileDescriptor()),e.path); }
+            boolean unchanged;
+            try (ParcelFileDescriptor fd=open(v.uri,"r")) { unchanged=v.matches(Os.fstat(fd.getFileDescriptor())); }
+            // Closing a writer can update timestamps asynchronously on Android's
+            // emulated storage. A changed stamp invalidates the fast path, not
+            // the copy: use the manifest digest on a fresh read of the document.
+            if (!unchanged) verify(v.uri,e,offer,progress);
         }
         return added;
     }
