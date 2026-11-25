@@ -11,6 +11,8 @@ from . import hardware
 
 
 _RECALBOX = Path('/recalbox/share')
+_BATOCERA_ROMS = Path('/userdata/roms')
+_ROCKNIX_ROMS = Path('/storage/roms')
 _MODEL = Path('/proc/device-tree/model')
 _MEDIA = Path('/run/media')
 
@@ -26,10 +28,23 @@ def is_pi() -> bool:
         return False
 
 
+def native_root(frontend: str) -> Path:
+    if frontend == 'retropie':
+        return Path.home() / 'RetroPie/roms'
+    if frontend == 'batocera':
+        return _BATOCERA_ROMS
+    if frontend == 'rocknix':
+        return _ROCKNIX_ROMS
+    raise ValueError(f'Unknown native frontend: {frontend}')
+
+
 def roots() -> list[Path]:
     home = Path.home()
     candidates = [home / 'Emulation/roms', _MEDIA / 'mmcblk0p1/Emulation/roms',
                   home / 'RetroDECK/roms', home / 'retrodeck/roms', _RECALBOX / 'roms']
+    for path in (native_root('retropie'), _BATOCERA_ROMS, _ROCKNIX_ROMS, home / 'ROMs'):
+        if not any(p.is_symlink() for p in (*reversed(path.parents), path)):
+            candidates.append(path)
     for pattern in ('*/Emulation/roms', '*/*/Emulation/roms', '*/*/retrodeck/roms'):
         candidates.extend(sorted(_MEDIA.glob(pattern)))
     result: list[Path] = []

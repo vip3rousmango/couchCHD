@@ -2,7 +2,53 @@
 
 CouchCHD is a controller-first disc library compressor for the living room. It converts supported disc images with MAME's `chdman`, verifies the result, builds portable multi-disc playlists, and keeps the originals until you explicitly purge them. It does not download games. Use disc images you are authorized to process.
 
-## One-command device setup (private SSH)
+## Install from GitHub
+
+Run this **on the target Linux device**. Use Konsole in Desktop Mode on Steam Deck/Bazzite, or open an SSH session to your retro appliance first:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/vip3rousmango/couchCHD/main/scripts/install-device.sh | sh
+```
+
+This runs code from this repository as your current user. To inspect it first, download the script to a file, read it, then run `sh install-device.sh`. Don't use `sudo` on the Deck. No build machine, clone, Python installation, or GitHub login is required on the target.
+
+The installer selects the x86-64 AppImage or aarch64 Linux tarball from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.1), verifies its SHA-256 against that release's manifest, and runs `--version` before activating it. It stops on a missing release, failed download or checksum mismatch. Both architectures require a **64-bit userspace, glibc 2.36+**, an executable data volume, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported by these binaries.
+
+Desktop Linux gets an Applications menu entry and launches immediately if a graphical display is available. On appliances the installer registers the launcher, tells you how to refresh the menu, and leaves the current frontend running. Setup does not convert or purge anything.
+
+| Detected frontend | Where to launch CouchCHD |
+| --- | --- |
+| [Recalbox EmulationStation](https://wiki.recalbox.com/en/advanced-usage/systems-display) | **Ports → CouchCHD** via a custom port system, not a Settings plugin. Restart Recalbox normally to reload the system list. Enable **Show Ports System** if hidden. |
+| [Batocera](https://wiki.batocera.org/systems:ports) | **Ports → CouchCHD**; update the game lists. |
+| [RetroPie](https://github.com/RetroPie/RetroPie-Setup/blob/master/scriptmodules/supplementary/retropiemenu.sh) | The **RetroPie configuration** carousel. Install as the frontend user, not with `sudo`. |
+| ROCKNIX | **Ports → CouchCHD** on supported 64-bit images. |
+| [Standalone EmulationStation](https://github.com/Aloshi/EmulationStation#writing-an-es_systemscfg) / [ES-DE](https://gitlab.com/es-de/emulationstation-de/-/blob/master/USERGUIDE.md) / native EmuDeck ES-DE | Uses a configured, shell-compatible Ports system. Rescan or restart the frontend after registration. Setup reports when it cannot safely register. |
+| RetroDECK Flatpak | Use the host desktop or Steam entry. The installer doesn't grant sandbox permissions or insert a host executable into a sandbox that can't launch it. |
+
+These are integration targets, not hardware certifications. Test with disposable media first; display drivers and the installed OS image matter as much as the board model.
+
+### Recalbox Web Manager
+
+**Ports → CouchCHD** opens the app on the console, not in a browser. In Recalbox 10.1.2, Manager v3's [sidebar](https://gitlab.com/recalbox/recalbox/-/blob/10.1.2/projects/manager3/src/layouts/MainLayout.vue) and [routes](https://gitlab.com/recalbox/recalbox/-/blob/10.1.2/projects/manager3/src/router/routes.ts) are compiled into the [system image](https://gitlab.com/recalbox/recalbox/-/blob/10.1.2/package/recalbox-manager3/recalbox-manager3.mk); its [ROM table](https://gitlab.com/recalbox/recalbox/-/blob/10.1.2/projects/manager3/src/components/emulation/EmulationSystemsRomsTabSystemContent.vue) has no launch action. We found no supported third-party menu registration. The installer doesn't patch Manager, remount the OS, or start a web service. A native browser tab would need an upstream extension point or an upstream CouchCHD integration.
+
+To check conversion history from Bazzite without opening another network port:
+
+```sh
+ssh root@recalbox.local '/recalbox/share/system/couchchd/run-couchchd --root /recalbox/share/roms --history'
+```
+
+### Other Linux frontends
+
+For a frontend with an existing ROM root and a **Ports system configured to execute `.sh` files**, register explicitly if its layout wasn't recognized:
+
+```sh
+app=~/.local/share/couchchd/run-couchchd  # or the full launcher path printed by setup
+"$app" --register-frontend ports "$app" --root /path/to/roms
+```
+
+This writes `ports/CouchCHD.sh`; it doesn't install an emulator or make an unsupported file type executable by a frontend. For launchers with an **Add application** workflow, point it at `run-couchchd` instead. Steam registration with artwork is available from inside CouchCHD's Settings. Console-only RetroArch/Lakka images without an external application launcher do not gain a Settings plugin. Neither macOS, Windows, musl-only Linux, nor 32-bit images can use these Linux binaries.
+
+## Optional: private SSH builds
 
 **Once on Bazzite:** keep this checkout at `~/couchCHD`. Put each trusted Linux build **and its matching `SHA256SUMS-<arch>`** in `dist/release/<arch>/`. These are the directories produced by `scripts/build_linux.sh` on native Debian 12 build machines. With a private Actions build, the equivalent download from the checkout is:
 
@@ -19,7 +65,7 @@ Only the target architecture is required. The source checkout alone is not a bin
 python3 scripts/send-device.py root@recalbox.local
 ```
 
-Bazzite probes the target over SSH, streams the matching build and authenticates it against the build manifest. No Python, GitHub token, inbound HTTP server, or internet connection is needed on the Pi. Installation uses `/recalbox/share/system/couchchd`. First launch runs a **headless scan** of `/recalbox/share/roms` and prints the result over SSH. It does not convert or purge anything. For the TV UI, first stop EmulationStation normally, then run `/recalbox/share/system/couchchd/run-couchchd` on the Pi. The ARM bundle requires 64-bit userspace, glibc 2.36+ and working graphics drivers for the UI.
+Bazzite probes the target over SSH and streams the matching artifact. No Python, GitHub token, HTTP server, or internet connection is needed on the target. Installation and frontend registration are the same as for the public installer.
 
 **Steam Deck — type this in Desktop Mode’s Konsole.** Set `host` to your Bazzite SSH login; Bazzite must accept SSH connections. Confirm its host-key fingerprint on first use. SSH keys avoid repeated password prompts.
 
@@ -86,6 +132,6 @@ Tests use synthetic sectors and temporary libraries, not bundled ROMs. Install `
 
 The native Linux release build compiles `chdman` from the pinned official MAME source using [`scripts/fetch_chdman.sh`](scripts/fetch_chdman.sh); it is not a downloaded opaque executable. The release targets are an x86-64 AppImage and an ARM64 Recalbox bundle. The source checkout does not itself contain these binaries. Device compatibility, display drivers and controllers must be validated on the target OS before describing a build as a tested release.
 
-On GitHub, run **Native Linux release candidates** to build both architectures without publishing. A `v*` tag stages a draft release with SHA-256 manifests. [Bundle installation and checksums](packaging/INSTALL.txt).
+On GitHub, run **Native Linux release candidates** manually to build both architectures without publishing. Numeric preview tags (`vX.Y.Z-preview.N`) publish test prereleases after native build checks; other version tags stage drafts for maintainer review. See [bundle installation and checksums](packaging/INSTALL.txt).
 
 CouchCHD is licensed under [GPL-3.0-only](LICENSE). MAME, Qt, SDL and other distributed dependencies retain their respective licenses. Product requirements and platform caveats are in [SPEC.md](SPEC.md).

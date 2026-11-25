@@ -44,7 +44,7 @@ jobs:
           export HOME=$(mktemp -d) XDG_DATA_HOME=$(mktemp -d)
           if [[ $arch == aarch64 ]]; then
             # This job runs in a disposable Debian container, not on a user's Pi.
-            mkdir -p /recalbox/share/{system,roms}
+            mkdir -p /recalbox/share/{system/.emulationstation,roms/ports}
             asset=CouchCHD-Recalbox-aarch64.tar.gz
             launcher=/recalbox/share/system/couchchd/run-couchchd
           else
@@ -55,6 +55,10 @@ jobs:
           digest=$(awk -v f="$asset" '$2 == f {print $1}' "$out/SHA256SUMS-$arch")
           sh scripts/install-device.sh --receive "$arch" "$digest" < "$out/$asset"
           "$launcher" --version
+          if [[ $arch == aarch64 ]]; then
+            test -s /recalbox/share/system/.emulationstation/systemlist.xml
+            test -f /recalbox/share/roms/ports/couchchd/CouchCHD.game
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-${{ matrix.arch }}
@@ -62,10 +66,10 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
-  draft:
-    # Manual dispatch on a branch only builds downloadable artifacts. A tag creates a
-    # draft, never a public release; publishing remains an explicit maintainer decision.
-    if: startsWith(github.ref, 'refs/tags/v')
+  release:
+    # Manual dispatch builds artifacts only. Public previews and normal tag drafts
+    # both require all native build, conversion, Qt and installer gates to pass.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: package
     runs-on: ubuntu-24.04
     permissions:
@@ -89,19 +93,29 @@ jobs:
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: assets/SHA256SUMS
-      - name: Stage assets for maintainer and hardware review
+      - name: Publish TEST prerelease or create maintainer draft
         working-directory: assets
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" --repo "$REPO" --verify-tag --draft --title "CouchCHD $TAG" --notes-file - ./* <<'NOTES'
-          Builds: x86_64 AppImage and aarch64 Recalbox tarball (64-bit glibc 2.36+). See INSTALL.txt in each bundle. rclone is optional.
+          set -euo pipefail
+          if [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$ ]]; then
+            title="TEST prerelease: CouchCHD $TAG"
+            visibility=(--prerelease --latest=false)
+          else
+            title="CouchCHD $TAG"
+            visibility=(--draft)
+          fi
+          gh release create "$TAG" --repo "$REPO" --verify-tag "${visibility[@]}" --title "$title" --notes-file - ./* <<'NOTES'
+          Hardware testing build, not device certification. Back up your library and test with disposable copies first.
 
-          Verify with `sha256sum --ignore-missing -c SHA256SUMS`. For public GitHub builds first run `gh attestation verify SHA256SUMS --repo OWNER/REPO` with the repository from this release URL. For chdman alone, extract its architecture-specific tarball and run `sha256sum -c SHA256SUMS` inside the extracted architecture directory.
+          Native Linux x86_64 AppImage and aarch64 tarball, built on Debian 12; 64-bit glibc 2.36+ userspace required. The ARM asset retains its original Recalbox filename. Qt also requires a working graphics/input stack; ARM devices without a desktop display need compatible EGL/KMS drivers. AArch64 architecture alone does not establish Pi, distro or frontend compatibility. See INSTALL.txt in the bundles. rclone is optional.
+
+          Verify downloaded files using the attached SHA256SUMS (`sha256sum --ignore-missing -c SHA256SUMS`). On public GitHub, verify the checksum manifest's provenance with `gh attestation verify SHA256SUMS --repo vip3rousmango/couchCHD`. For chdman alone, extract the architecture-specific tarball and run `sha256sum -c SHA256SUMS` inside its architecture directory.
 
           Corresponding source: CouchCHD, MAME, static SDL, Qt, PySide, pygame-ce, PyInstaller and the AppImage runtime archives accompany these binaries. See SOURCES-*.txt, including the exact Debian source package versions, and notices in each package.
 
-          Maintainer publication gate: test launch, gamepad-only navigation, real conversion + verify + undo on a disposable library, suspend/resume and reboot persistence on actual Steam Deck/Bazzite and Pi 4/Recalbox. Record OS, architecture, controller and results here. Review notices and ensure equivalent source access for all redistributed libraries (including wheel codecs) remains available beside the binaries; mirror sources as necessary. CI passing is not hardware certification. Do not publish unsupported compatibility claims.
+          Before a stable release: test launch from the device menu, gamepad-only navigation, conversion + verify + undo, suspend/resume and reboot persistence on actual target devices. Record OS/version, architecture, graphics stack, controller and results. Review notices and ensure continued access to the corresponding sources for redistributed libraries and wheel codecs.
           NOTES

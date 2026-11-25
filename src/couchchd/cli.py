@@ -1,6 +1,7 @@
 """Headless commands never import Qt or SDL. Default unattended action: scan."""
 
 import argparse
+import os
 import json
 import signal
 import sqlite3
@@ -17,6 +18,8 @@ def _parser():
     p.add_argument('--root', type=Path, help='ROM root containing system folders (e.g. psx, dreamcast)')
     p.add_argument('--headless', action='store_true', help='run without Qt; scan unless an action is given')
     actions = p.add_mutually_exclusive_group()
+    actions.add_argument('--register-frontend', nargs=2, metavar=('FRONTEND', 'LAUNCHER'),
+                         help='register an installed launcher; use ports + --root for a custom shell-compatible library')
     actions.add_argument('--auto', action='store_true', help='compress selected systems and quarantine verified originals')
     actions.add_argument('--history', action='store_true', help='show the batch ledger')
     actions.add_argument('--undo', action='store_true', help='restore originals from the most recent undoable batch')
@@ -42,6 +45,39 @@ def main(argv=None):
         parser.error('--ingest, --system, --keep-originals and --preset require --auto')
     if args.yes and not args.purge:
         parser.error('--yes is only meaningful with --purge')
+    if args.register_frontend:
+        from .menu_entry import install_desktop, install_script
+        frontend, executable = args.register_frontend
+        try:
+            launcher = Path(executable).expanduser().absolute()
+            if not launcher.is_file() or not os.access(launcher, os.X_OK):
+                raise ValueError(f'Not an executable CouchCHD launcher: {launcher}')
+            if frontend == 'desktop':
+                from . import es_frontends
+                print('Applications menu:', install_desktop(launcher))
+                messages = es_frontends.register(launcher, roms=args.root)
+            elif frontend == 'recalbox':
+                from .recalbox_menu import register
+                if launcher.parts[-3:] != ('system', 'couchchd', 'run-couchchd'):
+                    raise ValueError('Recalbox launcher must be installed under SHARE/system/couchchd.')
+                register(launcher.parents[2])
+                return 0
+            elif frontend == 'ports':
+                if args.root is None or not args.root.is_dir():
+                    raise ValueError('Supply the existing ROM root of a shell-compatible ports system with --root.')
+                root = args.root.expanduser().absolute()
+                entry = root / 'ports/CouchCHD.sh'
+                install_script(entry, launcher, args=('--root', str(root)))
+                messages = [f'Installed {entry}. Refresh the frontend’s game list.']
+            else:
+                from . import native_frontends
+                messages = native_frontends.register(launcher, frontend, roms=args.root)
+            for message in messages:
+                print(message)
+            return 0
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f'CouchCHD menu setup: {exc}', file=sys.stderr)
+            return 1
     if not (args.headless or args.auto or args.undo or args.history or args.purge or args.extract):
         try:
             from .ui import launch

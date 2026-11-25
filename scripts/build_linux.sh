@@ -30,6 +30,19 @@ if [[ ${COUCHCHD_RUN_TESTS:-0} == 1 ]]; then
     PYTHONPATH="$work/test-deps" QT_QPA_PLATFORM=offscreen python -m pytest
 fi
 qt=$(python -c 'import pathlib, PySide6; print(pathlib.Path(PySide6.__file__).parent / "Qt")')
+# PySide6 Essentials 6.7.3 ships the EGLFS/KMS plugin but omits one of its
+# private shared libraries. Use the matching upstream Qt build, not distro Qt.
+case $arch in
+    aarch64) repo=linux_arm64; kit=gcc_arm64; platform=Linux-Debian_11_6-GCC-Linux-Debian_11_6-AARCH64
+        qtbase_digest=850f7d2b73c958ce80ef47a81c18f64d03d3be606637278d14acb8959e6dfe8c ;;
+    x86_64) repo=linux_x64; kit=gcc_64; platform=Linux-RHEL_8_8-GCC-Linux-RHEL_8_8-X86_64
+        qtbase_digest=f37a29c373ad5c2f4b31657fdefe415015c7298f957c49572227950774385f83 ;;
+esac
+qtbase_url="https://download.qt.io/online/qtsdkrepository/$repo/desktop/qt6_673/qt.qt6.673.linux_$kit/6.7.3-0-202409200836qtbase-$platform.7z"
+curl --proto '=https' --proto-redir '=https' -fsSL "$qtbase_url" -o "$work/qtbase.7z"
+printf '%s  %s\n' "$qtbase_digest" "$work/qtbase.7z" | sha256sum --check
+gbm=libQt6EglFsKmsGbmSupport.so
+bsdtar -xOf "$work/qtbase.7z" "6.7.3/$kit/lib/$gbm.6.7.3" > "$qt/lib/$gbm.6"
 sdl=$(python -c 'import sysconfig; print(sysconfig.get_path("platlib") + "/pygame_ce.libs")')
 python -m PyInstaller --clean --noconfirm --onedir --name couchchd --noupx \
     --specpath "$work" --workpath "$work/build" --distpath "$work/frozen" \
@@ -38,12 +51,19 @@ python -m PyInstaller --clean --noconfirm --onedir --name couchchd --noupx \
     --hidden-import pygame._sdl2.controller --hidden-import pygame.mixer \
     --add-binary "$sdl:pygame_ce.libs" \
     --add-binary "$qt/plugins/egldeviceintegrations:PySide6/Qt/plugins/egldeviceintegrations" \
+    --add-binary "$qt/lib/$gbm.6:PySide6/Qt/lib" \
     --add-binary "$COUCHCHD_CHDMAN:bin/$arch" "$root/packaging/launcher.py"
 app="$work/frozen/couchchd"
+# Load the delivered KMS plugin and its complete link closure without a display.
+# Xvfb alone only exercises xcb; this still does not test an actual KMS device.
+LD_LIBRARY_PATH="$app/_internal:$app/_internal/PySide6/Qt/lib" /usr/bin/python3 -I -c \
+    'import ctypes, sys; ctypes.CDLL(sys.argv[1])' "$app/_internal/PySide6/Qt/plugins/egldeviceintegrations/libqeglfs-kms-integration.so"
 install -m 644 LICENSE packaging/INSTALL.txt "$app/"
 mkdir -p "$app/fonts"
 install -m 644 /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf "$app/fonts/"
 python packaging/collect_notices.py "$app/notices"
+printf '\nQt EGLFS/GBM binary: %s (SHA256 %s); source: Qt 6.7.3 archive above.\n' \
+    "$qtbase_url" "$qtbase_digest" >> "$app/notices/SOURCES.txt"
 cp -r "bin/$arch/licenses" "$app/notices/converter"
 cp "bin/$arch/"{PROVENANCE.txt,SHA256SUMS} "$app/notices/converter/"
 bash scripts/collect_upstream.sh "$work/sources" "$app/notices" "$out"
@@ -61,6 +81,8 @@ cp "bin/$arch/SHA256SUMS" "$out/chdman-$arch.sha256"
 # Include notices with the separately downloadable native converter.
 tar -C bin -czf "$out/chdman-$arch.tar.gz" "$arch"
 if [[ $arch == x86_64 ]]; then
+    # Publish the installer from this exact tag with the checksummed binaries.
+    install -m 755 scripts/install-device.sh "$out/install-device.sh"
     git archive --format=tar.gz --prefix=couchchd-source/ HEAD > "$out/CouchCHD-source.tar.gz"
     bash scripts/build_appimage.sh "$app" "$out/CouchCHD-x86_64.AppImage"
     launch=("$out/CouchCHD-x86_64.AppImage" --appimage-extract-and-run)

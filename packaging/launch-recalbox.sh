@@ -1,10 +1,16 @@
 #!/bin/sh
-# Extract the bundle below /recalbox/share/system/couchchd, on an executable mount.
-# Stop EmulationStation before modifying its gamelist. No read-only system files change.
+# The archive and this entry point retain their original names on all ARM targets.
+# Frontend installers set COUCHCHD_HOME to their persistent application directory.
 set -eu
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 case $(uname -m) in aarch64) ;; *) echo 'This bundle requires a 64-bit ARM Linux userspace.' >&2; exit 2;; esac
-state=${COUCHCHD_HOME:-/recalbox/share/system/couchchd}
+if [ -n "${COUCHCHD_HOME:-}" ]; then
+    state=$COUCHCHD_HOME
+elif [ -d /recalbox/share/system ]; then
+    state=/recalbox/share/system/couchchd
+else
+    state=${XDG_DATA_HOME:-$HOME/.local/share}/couchchd
+fi
 : "${XDG_CONFIG_HOME:=$state/config}" "${XDG_DATA_HOME:=$state/data}" "${XDG_STATE_HOME:=$state/state}" "${XDG_CACHE_HOME:=$state/cache}" "${TMPDIR:=$state/tmp}"
 export XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME TMPDIR
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME" "$TMPDIR"

@@ -1,4 +1,4 @@
-"""Run both install transports with isolated storage and a loopback SSH stand-in."""
+"""Run all install transports against isolated storage and local release fixtures."""
 import hashlib
 import os
 from pathlib import Path
@@ -25,6 +25,15 @@ def target(tmp_path):
     executable(tools / 'uname', 'case $1 in -s) echo Linux;; -m) echo x86_64;; esac')
     executable(tools / 'od', 'echo 2')  # ELF class byte of a 64-bit target shell
     executable(tools / 'ssh', '[ "$1" != -n ] || shift; shift; exec sh -c "$1"')
+    executable(tools / 'curl', '''
+        dest=/dev/stdout
+        while [ "$#" -gt 1 ]; do
+            if [ "$1" = -o ]; then dest=$2; shift; fi
+            shift
+        done
+        case $1 in https://github.com/vip3rousmango/couchCHD/releases/download/v*/?*) ;; *) exit 22;; esac
+        cat "artifacts/x86_64/${1##*/}" > "$dest"
+    ''')
     if not shutil.which('sha256sum'):
         executable(tools / 'sha256sum', 'exec shasum -a 256 "$@"')
     data = tmp_path / 'installed builds'
@@ -32,17 +41,20 @@ def target(tmp_path):
     out = tmp_path / 'artifacts/x86_64'
     out.mkdir(parents=True)
     image = out / 'CouchCHD-x86_64.AppImage'
-    executable(image, 'case "$*" in --appimage-extract-and-run) echo GUI;; "--appimage-extract-and-run --version") echo version;; *) exit 6;; esac')
+    executable(image, 'case "$*" in --appimage-extract-and-run) echo GUI;; "--appimage-extract-and-run --version") echo version;; "--appimage-extract-and-run --register-frontend desktop "*) echo "Menu: $4";; *) exit 6;; esac')
     digest = hashlib.sha256(image.read_bytes()).hexdigest()
     (out / 'SHA256SUMS-x86_64').write_text(f'{digest}  {image.name}\n')
     return tmp_path, env, data / 'couchchd', image
 
 
-@pytest.mark.parametrize('push', [True, False])
-def test_install_launch_and_reject_damaged_update(target, push):
+@pytest.mark.parametrize('transport', ['github', 'push', 'pull'])
+def test_install_launch_and_reject_damaged_update(target, transport):
     tmp, env, base, image = target
-    cmd = ([sys.executable, SCRIPTS / 'send-device.py', '--builds', 'artifacts', 'device'] if push else
-           ['sh', SCRIPTS / 'install-device.sh', 'host', 'artifacts'])
+    cmd = {
+        'github': ['sh', SCRIPTS / 'install-device.sh'],
+        'push': [sys.executable, SCRIPTS / 'send-device.py', '--builds', 'artifacts', 'device'],
+        'pull': ['sh', SCRIPTS / 'install-device.sh', 'host', 'artifacts'],
+    }[transport]
     def install():
         return subprocess.run(cmd, cwd=tmp, env=env, capture_output=True, text=True)
     for _ in range(2):

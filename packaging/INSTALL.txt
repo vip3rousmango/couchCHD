@@ -10,18 +10,42 @@ unavailable, use ./CouchCHD-x86_64.AppImage --appimage-extract and run
 squashfs-root/AppRun. Use the Gamepad with Joystick Trackpad Steam Input layout,
 not a desktop/mouse layout. All CouchCHD CLI arguments pass through AppRun.
 
-aarch64 Linux / Recalbox: use a 64-bit *userspace* (a 64-bit kernel alone is
-not enough), glibc 2.36+ and an executable, writable data mount. Extract the
-archive under /recalbox/share/system (it has a couchchd/ top-level directory).
-Run /recalbox/share/system/couchchd/launch-recalbox.sh. The launcher does not
-edit EmulationStation, remount /, or install system packages. Stop the frontend
-cleanly before writing gamelist.xml or trying to acquire the KMS display. Set
-QT_QPA_PLATFORM to select Wayland/XCB; without a display server the launcher
-selects EGLFS, requiring a working board EGL/KMS driver and access to /dev/dri
-and /dev/input. For SSH use launch-recalbox.sh --headless --help. Do not try
-to install Desktop Linux glibc or GPU libraries on an incompatible Recalbox.
-Keep the executable directory, ROM library and backup ledger when upgrading;
-never recursively delete /recalbox/share/system/couchchd to update the app.
+Recalbox (64-bit userspace, glibc 2.36+, writable executable SHARE):
+Use scripts/install-device.sh for a persistent EmulationStation entry. When
+ready, press START > QUIT > RESTART RECALBOX. Open Ports > CouchCHD. If Ports
+is hidden, enable START > SYSTEM-LISTS & GAMELISTS SETTINGS > SHOW PORTS SYSTEM.
+Choose Exit CouchCHD in the app to return. Setup does not restart the console.
+
+On the Recalbox 10.1.2 Pi 4 layout, Ports aggregates registered port systems;
+dropping a .sh file in roms/ports is not sufficient. The installed bundle
+registers one custom port in
+/recalbox/share/system/.emulationstation/systemlist.xml. Its .game extension
+is registered explicitly. roms/ports/couchchd/CouchCHD.game is only a list
+entry; its contents are not executed. The port's command starts the installed
+/recalbox/share/system/couchchd/run-couchchd, not an emulator. Reinstalling
+preserves other systems and existing gamelist metadata. No remount is needed.
+
+ES releases its window for the launch but remains running. Do not edit game
+metadata from this menu session: ES can overwrite gamelist.xml from cache.
+For gamelist writes, stop ES cleanly first and run the stable launcher
+separately. For a scan over SSH, use run-couchchd --headless --root
+/recalbox/share/roms (all on one line). For a manual install without a menu
+entry, extract the ARM archive under /recalbox/share/system and run
+/recalbox/share/system/couchchd/launch-recalbox.sh with ES stopped.
+
+Without a display server the ARM launcher selects EGLFS; it needs working
+EGL/KMS drivers and /dev/dri and /dev/input access. Set QT_QPA_PLATFORM to
+select Wayland/XCB instead. The menu integration is for regular HDMI output,
+not CRT-adapter mode. Do not replace the OS glibc or GPU drivers, or delete
+the CouchCHD data/backup ledger when upgrading. Real Pi 4 display, controller
+input and return to ES have not been verified on hardware.
+
+Recalbox references (10.1.2 source used for menu integration):
+https://wiki.recalbox.com/en/advanced-usage/systems-display
+https://gitlab.com/recalbox/recalbox/-/blob/10.1.2/projects/frontend/es-app/src/systems/SystemDeserializer.cpp
+https://gitlab.com/recalbox/recalbox/-/blob/10.1.2/projects/frontend/es-app/src/systems/SystemManager.cpp
+https://gitlab.com/recalbox/recalbox/-/blob/10.1.2/projects/frontend/es-app/src/emulators/run/GameRunner.cpp
+https://gitlab.com/recalbox/recalbox/-/blob/10.1.2/projects/frontend/data/resources/menu.xml
 
 Both packages include Python, the Qt/QML runtime, SDL controller support and
 one architecture-matched static chdman. rclone and a configured remote are
