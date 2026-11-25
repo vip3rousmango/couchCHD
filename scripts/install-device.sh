@@ -37,7 +37,7 @@ install() {
     case ${1:-} in
         '') [ "$#" = 0 ] || fail 'Empty SSH host.'
             transport=github
-            release=https://github.com/vip3rousmango/couchCHD/releases/download/v0.1.0-preview.2
+            release=https://github.com/vip3rousmango/couchCHD/releases/download/v0.1.0-preview.3
             command -v curl >/dev/null 2>&1 || fail 'The GitHub installer requires curl with HTTPS support.'
             printf 'Installing %s from %s\n' "$asset" "$release" >&2
             manifest=$(fetch "$release/SHA256SUMS-$arch") || fail "Cannot download release manifest. Check your connection and whether $release is available."
@@ -94,6 +94,10 @@ install() {
     fi
     {
         printf '%s\n' '#!/bin/sh' '# CouchCHD managed launcher'
+        cat <<'LOCATION'
+here=$(CDPATH='' cd -P "$(dirname "$0")" && pwd) || exit 1
+export COUCHCHD_LAUNCHER="$here/run-couchchd"
+LOCATION
         if [ "$arch:$frontend" = x86_64:desktop ]; then
             cat <<'GRAPHICS'
 # This Qt Quick UI does not need a GPU. Avoid requiring a working EGL/GLX
@@ -106,7 +110,21 @@ if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && [ -z "${QT_QUICK_BACKEND:-}${QSG
 fi
 GRAPHICS
         fi
-        printf '%s\n' "exec \"\$(dirname \"\$0\")/builds/${final##*/}/run\" \"\$@\""
+        if [ "$frontend" = desktop ]; then
+            cat <<'STEAM_LOG'
+if [ -n "${SteamGameId:-}${SteamAppId:-}" ]; then
+    # Steam hides stderr in Gaming Mode. Replace the last launch log without
+    # following an existing symlink or changing permissions on other files.
+    if log=$(mktemp "$here/.steam-launch.XXXXXX"); then
+        exec 2>"$log"
+        mv -fT "$log" "$here/steam-launch.log"
+        printf 'CouchCHD Steam launch %s; Qt platform=%s renderer=%s\n' \
+            "$(date -u)" "${QT_QPA_PLATFORM:-auto}" "${QT_QUICK_BACKEND:-auto}" >&2
+    fi
+fi
+STEAM_LOG
+        fi
+        printf '%s\n' "exec \"\$here/builds/${final##*/}/run\" \"\$@\""
     } > "$tmp/entry"
     chmod 755 "$tmp/entry"; mv -f "$tmp/entry" "$launcher"
     cleanup; trap - EXIT HUP INT TERM

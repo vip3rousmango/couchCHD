@@ -50,6 +50,7 @@ jobs:
           else
             asset=CouchCHD-x86_64.AppImage
             launcher="$XDG_DATA_HOME/couchchd/run-couchchd"
+            mkdir -p "$HOME/.local/share/Steam/userdata/123/config"
           fi
           test "$(sh scripts/install-device.sh --probe)" = "$arch"
           digest=$(awk -v f="$asset" '$2 == f {print $1}' "$out/SHA256SUMS-$arch")
@@ -58,6 +59,12 @@ jobs:
           if [[ $arch == aarch64 ]]; then
             test -s /recalbox/share/system/.emulationstation/systemlist.xml
             test -f /recalbox/share/roms/ports/couchchd/CouchCHD.game
+          else
+            python3 -m venv "$HOME/reader"
+            grep '^vdf==' packaging/requirements-linux.txt > "$HOME/vdf.txt"
+            "$HOME/reader/bin/pip" install --require-hashes --no-deps -r "$HOME/vdf.txt"
+            xvfb-run -a -s '-screen 0 1280x800x24 -extension GLX' \
+              "$HOME/reader/bin/python" scripts/smoke_steam_shortcut.py "$launcher"
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

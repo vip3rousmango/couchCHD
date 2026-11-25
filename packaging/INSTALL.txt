@@ -4,11 +4,12 @@ Verify the downloaded artifacts against SHA256SUMS before executing them:
   sha256sum --ignore-missing -c SHA256SUMS
 Compare the release tag/commit and GitHub build provenance for that exact file.
 
-x86_64 Linux: chmod +x CouchCHD-x86_64.AppImage, then launch it from your file
-manager or add the AppImage to Steam as a Non-Steam Game. If FUSE mounting is
-unavailable, use ./CouchCHD-x86_64.AppImage --appimage-extract and run
-squashfs-root/AppRun. Use the Gamepad with Joystick Trackpad Steam Input layout,
-not a desktop/mouse layout. All CouchCHD CLI arguments pass through AppRun.
+x86_64 Linux / Steam Deck: run the installer from Desktop Mode with Steam
+fully exited. Setup registers the persistent run-couchchd launcher in your
+native Steam library. In Gaming Mode, open Library > Non-Steam > CouchCHD.
+Leave forced compatibility (Proton) off; this is a native Linux application.
+Do not add a raw AppImage or an extracted AppRun as the installed shortcut.
+Use the Gamepad with Joystick Trackpad Steam Input layout.
 
 Recalbox (64-bit userspace, glibc 2.36+, writable executable SHARE):
 Use scripts/install-device.sh for a persistent EmulationStation entry. When

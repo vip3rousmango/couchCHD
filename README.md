@@ -12,11 +12,15 @@ curl -f https://vip3rousmango.github.io/couchCHD/i | sh
 
 This runs code from this repository as your current user. To inspect it first, download the script to a file, read it, then run `sh install-device.sh`. Don't use `sudo` on the Deck. No build machine, clone, Python installation, or GitHub login is required on the target.
 
-The installer selects the x86-64 AppImage or aarch64 Linux tarball from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.2), verifies its SHA-256 against that release's manifest, and runs `--version` before activating it. It stops on a missing release, failed download or checksum mismatch. Both architectures require a **64-bit userspace, glibc 2.36+**, an executable data volume, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported by these binaries.
+The installer selects the x86-64 AppImage or aarch64 Linux tarball from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.3), verifies its SHA-256 against that release's manifest, and runs `--version` before activating it. It stops on a missing release, failed download or checksum mismatch. Both architectures require a **64-bit userspace, glibc 2.36+**, an executable data volume, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported by these binaries.
 
 Desktop Linux gets an Applications menu entry and launches immediately if a graphical display is available. On appliances the installer registers the launcher, tells you how to refresh the menu, and leaves the current frontend running. Setup does not convert or purge anything.
 
-**Steam Deck: installed but no window?** If Konsole printed `Failed to initialize graphics backend for OpenGL`, rerun the short installer above in Desktop Mode. It refreshes the existing launcher to use Qt Quick software rendering, without removing your library or settings. Search for **CouchCHD** in the KDE application launcher; in ES-DE, rescan the ROM directory and look under **Ports**. Installing does not automatically add a Steam library shortcut.
+**Steam Deck / Gaming Mode:** In Desktop Mode, choose **Steam → Exit** (closing the window is not enough), then run the installer above. Setup registers the persistent `run-couchchd` launcher for your signed-in native Steam account. Return to Gaming Mode and choose **Library → Non-Steam → CouchCHD → Play**. You don't need to manually add the AppImage or desktop file. If you already did, leave the shortcut in place during setup.
+
+**If Play immediately returns:** under the shortcut's **Properties → Shortcut**, Target should be `"/home/deck/.local/share/couchchd/run-couchchd"` for the default Deck installation, Start In should be `"/home/deck/.local/share/couchchd"`, and Launch Options should normally be empty. Under **Compatibility**, leave **Force the use of a specific Steam Play compatibility tool** unchecked: this app is native Linux. After attempting Play, inspect `~/.local/share/couchchd/steam-launch.log` in Desktop Mode. A fresh log means the launcher ran; if no fresh log appeared, check the target and compatibility setting first.
+
+**Desktop Mode:** search for **CouchCHD** in KDE's application menu. The installed x86-64 launcher uses software rendering by default to avoid OpenGL startup failures. In ES-DE, rescan the ROM directory and look under **Ports**.
 
 | Detected frontend | Where to launch CouchCHD |
 | --- | --- |
