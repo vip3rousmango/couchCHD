@@ -9,7 +9,7 @@ description = "Controller-first, verified CHD compression and reversible ROM lib
 requires-python = ">=3.11"
 license = "GPL-3.0-only"
 license-files = ["LICENSE"]
-authors = [{ name = "viperousmango" }]
+authors = [{ name = "vip3rousmango" }]
 readme = "README.md"
 dependencies = ["dbus-next>=0.2.3,<1; sys_platform == 'linux'"]
 
