@@ -6,7 +6,7 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-    build-essential binutils git ca-certificates curl pkg-config python3 python3-venv \
+    build-essential binutils git ca-certificates curl pkg-config proot python3 python3-venv \
     libpython3.11 libarchive-tools squashfs-tools desktop-file-utils zstd fonts-dejavu-core xauth xvfb xdotool \
     python3-gi gir1.2-glib-2.0 gir1.2-gdkpixbuf-2.0 \
     libfontconfig1 libglib2.0-0 libglib2.0-bin libdbus-1-3 libgl1 libegl1 libgl1-mesa-dri libgbm1 \

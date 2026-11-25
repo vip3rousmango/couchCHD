@@ -1,6 +1,6 @@
 # CouchCHD
 
-CouchCHD is a controller-first disc library compressor for the living room. It converts supported disc images with MAME's `chdman`, verifies the result, builds portable multi-disc playlists, and keeps the originals until you explicitly purge them. It does not download games. Use disc images you are authorized to process.
+CouchCHD is a controller-first ROM library compressor. It converts locally, verifies outputs before publication, and journals changes so you can undo a batch before purging backups. It works alongside EmuDeck; it does not install emulators or download games. Use images you are authorized to process.
 
 ## Install from GitHub
 
@@ -12,7 +12,7 @@ curl -f https://vip3rousmango.github.io/couchCHD/i | sh
 
 This runs code from this repository as your current user. To inspect it first, download the script to a file, read it, then run `sh install-device.sh`. Don't use `sudo` on the Deck. No build machine, clone, Python installation, or GitHub login is required on the target.
 
-The installer selects the x86-64 AppImage, aarch64 tarball or single-card Recalbox image from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.12), verifies SHA-256 against the release manifest, and runs `--version` before activating it. Both architectures require **64-bit Linux userspace, glibc 2.36+**, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported.
+The installer selects the x86-64 AppImage, aarch64 tarball or single-card Recalbox image from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.13), verifies SHA-256 against the release manifest, and runs `--version` before activating it. Both architectures require **64-bit Linux userspace, glibc 2.36+**, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported.
 
 Desktop Linux gets an Applications menu entry and launches immediately if a graphical display is available. On appliances the installer registers the launcher, tells you how to refresh the menu, and leaves the current frontend running. Setup does not convert or purge anything.
 
@@ -103,9 +103,24 @@ The Deck downloads the x86-64 AppImage from Bazzite, checks SHA-256, and opens t
 
 Both paths stage and test the executable before switching the launcher. Repeating setup reuses the same build directory. Distinct previous builds remain under `builds/`; configs, originals, backups and the undo ledger are not replaced. No release is published and no system partition is remounted.
 
+## Formats and emulator compatibility
+
+Choose a format for the **emulator that will play the game**, not just the smallest file. CouchCHD does not transcode an entire directory based on filename extension alone.
+
+| Input | Output | What matters |
+| --- | --- | --- |
+| Supported CD/GD collections (`.cue` plus tracks; Dreamcast also `.gdi`) and PS2 DVD images | CHD | Existing PS1, PS2, Dreamcast, Saturn and Sega CD support, plus CUE-based PC Engine CD, PC-FX, Neo Geo CD, 3DO, Amiga CD32 and CDTV for compatible cores. Do not convert individual track files. |
+| PSP ISO | CHD (default) or CSO | Choose the PSP format in Settings or pass `--psp-format cso`. Existing files are not renamed. |
+| Raw GameCube or Wii ISO | RVZ | Dolphin format; no scrubbing. Compare decoded data against the source before publishing. |
+| Original Xbox full-disc XGD1 image | `.xiso.iso` | A playable filesystem repack, **not** a sector-exact backup. Existing XISOs and Xbox 360 discs are not candidates. Always retains the input. |
+| Nintendo 3DS CARD1 `.3ds` / `.cci` | `.trim.cci` | Preserves cartridge content and removes known padding; uses the [CCI extension accepted by Azahar](https://azahar-emu.org/blog/game-loading-changes/). Trimming does not decrypt a game. Writable CARD2 and ambiguous images are not eligible. Always retains the input. |
+| Recognized single-cartridge ROMs for supported NES, SNES, Game Boy, GBA, N64, Mega Drive, Master System and Game Gear cores | `.7z` | One ROM per archive; verify the extracted bytes. Check that your frontend **and core** support archives. No arcade sets, BIOS collections, disc tracks or nested archives. |
+
+Multidisc organization is separate from compression. Don't assume that an emulator accepting CHD accepts M3U. After updating an EmuDeck library, rescan ES-DE or rerun Steam ROM Manager as appropriate. See [when to use CouchCHD alongside EmuDeck](docs/emudeck-comparison.md).
+
 ## Run from source
 
-Python 3.11+; `chdman` 0.256 or newer is required **for conversion and extraction**, not for scanning. Use the project-built binary, put a supported `chdman` on `PATH`, or set `COUCHCHD_CHDMAN` to its absolute path. Optional cloud ingestion uses an already configured `rclone` installation. A mounted NAS needs no rclone configuration.
+Python 3.11+. CHD conversion/extraction requires `chdman` 0.256 or newer (`COUCHCHD_CHDMAN`, bundled copy or `PATH`); RVZ requires DolphinTool. Scanning doesn't need either helper. Optional cloud ingestion uses an already configured `rclone` installation. A mounted NAS needs no rclone configuration.
 
 ```sh
 python3 -m venv venv
@@ -121,6 +136,8 @@ For a headless install, use `python -m pip install .` instead. Select the **ROM 
 couchchd --root /games/roms --headless
 # Verify first with originals left in their current locations.
 couchchd --root /games/roms --headless --auto --system psx --keep-originals
+# Use CSO for PSP; keep the original ISOs for emulator testing.
+couchchd --root /games/roms --auto --system psp --psp-format cso --keep-originals
 # Convert a different system and quarantine its verified originals (the default).
 couchchd --root /games/roms --headless --auto --system saturn
 # Read one disc at a time from a configured remote; never delete remote originals.
@@ -149,7 +166,7 @@ If the device feels too hot during a batch, press **B → Cancel batch** and wai
 - CUE/GDI tracks must resolve to nonempty regular files; ambiguous case matches, unsupported layouts, truncated sectors, and active transfers are not eligible. Original descriptors are never edited in place. ISO images require a recognized volume header. See [the system and format table](SPEC.md).
 - CD always retains the default `createcd` hunk size. Portable devices try CD Deflate and CD FLAC, skipping LZMA; other systems keep the default codec search. DVD-mode ISOs (PSP and PS2 DVD) use `createdvd -hs 2048 -c zlib`. Trying fewer lossless codecs can finish sooner at the cost of a larger file on some discs. Both raw and overall SHA-1 and matching disc geometry are still required. The RetroAchievements indicator describes this format policy, **not** a network lookup or proof that a game is in the RetroAchievements database.
 - Originals move to `_couchchd_backup/` only after verified publication. Shared tracks stay in place while a live descriptor might still need them. Relative `.m3u` entries point to `.chd_discs/`; single discs keep their normal CHD names. Stop Recalbox EmulationStation before metadata changes; re-run Steam ROM Manager after paths change.
-- The SQLite ledger (`couchchd_history.db`) tracks filesystem operations. Undo restores originals without overwriting conflicts and retains generated CHDs under `_couchchd_backup/.undo/`. A changed file is grounds to stop, not permission to overwrite it.
+- The SQLite ledger (`couchchd_history.db`) tracks filesystem operations. Undo restores originals without overwriting conflicts and retains generated game images under `_couchchd_backup/.undo/`. Editing or replacing an output invalidates its backup-purge proof. XISO and trimmed 3DS outputs never authorize source removal.
 - Quarantine on the same volume does **not** reclaim space. After testing the CHDs in your emulator and making an independent backup, `couchchd --root /games/roms --purge --yes` permanently deletes authenticated quarantined files. A purged batch cannot be undone. BIN/CUE extraction creates a playable disc representation, not an exact reconstruction of original descriptor text, filenames, or layout.
 
 Quarantine is not protection against drive failure. Keep an independent backup of valuable dumps and the ledger. For a NAS, use a filesystem with working cross-process locks, flush, and rename semantics. For local scratch use a fast filesystem with adequate headroom (`TMPDIR` on Linux). Recalbox data belongs on the persistent `/recalbox/share` partition.
@@ -168,7 +185,7 @@ python -m pytest
 
 Tests use synthetic sectors and temporary libraries, not bundled ROMs. Install `chdman` or set `COUCHCHD_CHDMAN` to exercise the real conversion round trips as well as fault-injection tests.
 
-The native Linux release build compiles `chdman` from the pinned official MAME source using [`scripts/fetch_chdman.sh`](scripts/fetch_chdman.sh); it is not a downloaded opaque executable. The release targets are an x86-64 AppImage and an ARM64 Recalbox bundle. The source checkout does not itself contain these binaries. Device compatibility, display drivers and controllers must be validated on the target OS before describing a build as a tested release.
+Native release artifacts include the converter tools and notices; the source checkout does not contain ready-to-run Linux bundles. The build compiles `chdman` from [pinned MAME source](scripts/fetch_chdman.sh) and packages [DolphinTool](scripts/package_rvz.sh) for RVZ. Conversion tests use the frozen app on native x86-64 and aarch64 runners. These tests do not certify a particular GPU driver, console, emulator or game.
 
 On GitHub, run **Native Linux release candidates** manually to build both architectures without publishing. Numeric preview tags (`vX.Y.Z-preview.N`) publish test prereleases after native build checks; other version tags stage drafts for maintainer review. See [bundle installation and checksums](packaging/INSTALL.txt).
 

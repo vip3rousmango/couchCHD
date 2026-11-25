@@ -29,7 +29,7 @@ def _card() -> bytes:
 @pytest.mark.parametrize('filled', [0, 51 * 512, 52 * 512 + 1])
 def test_recovers_every_byte_including_update_and_declared_extras(tmp_path, extension, filled):
     source = tmp_path / ('Kart' + extension)
-    target = tmp_path / 'Kart.trim.3ds'
+    target = tmp_path / 'Kart.trim.cci'
     data = bytearray(_card())
     struct.pack_into('<Q', data, 0x300, filled)
     source.write_bytes(data)
@@ -61,7 +61,7 @@ def test_recovers_every_byte_including_update_and_declared_extras(tmp_path, exte
 ])
 def test_rejects_ambiguous_cartridge_and_partition_bounds(tmp_path, offset, field):
     source = tmp_path / 'Bad.3ds'
-    target = tmp_path / 'Bad.trim.3ds'
+    target = tmp_path / 'Bad.trim.cci'
     data = bytearray(_card())
     data[offset:offset + len(field)] = field
     source.write_bytes(data)
@@ -80,7 +80,7 @@ def test_rejects_non_erased_tail_anywhere_and_cleans_output(tmp_path, bad):
     data[51 * 512 + bad] = 0
     source = tmp_path / 'BadTail.cci'
     source.write_bytes(data)
-    target = tmp_path / 'BadTail.trim.3ds'
+    target = tmp_path / 'BadTail.trim.cci'
     with pytest.raises(ValueError, match='not reconstructable'):
         trim3ds.convert(source, target, cancel=Event(), threads=1)
     assert not target.exists() and source.read_bytes() == data
@@ -89,7 +89,7 @@ def test_rejects_non_erased_tail_anywhere_and_cleans_output(tmp_path, bad):
 def test_never_replaces_files_and_cancellation_removes_partial_output(tmp_path):
     source = tmp_path / 'Title.cci'
     source.write_bytes(_card())
-    target = tmp_path / 'Title.trim.3ds'
+    target = tmp_path / 'Title.trim.cci'
     target.write_bytes(b'keep')
     with pytest.raises(FileExistsError):
         trim3ds.convert(source, target, cancel=Event(), threads=1)
@@ -106,7 +106,7 @@ def test_never_replaces_files_and_cancellation_removes_partial_output(tmp_path):
 
 def test_verification_compares_retained_bytes_not_only_geometry(tmp_path):
     source = tmp_path / 'Title.3ds'
-    target = tmp_path / 'Title.trim.3ds'
+    target = tmp_path / 'Title.trim.cci'
     source.write_bytes(_card())
     trim3ds.convert(source, target, cancel=Event(), threads=1)
     with target.open('r+b') as out:

@@ -209,7 +209,7 @@ def test_selected_psp_format_survives_separate_network_staging(tmp_path):
 
 @pytest.mark.parametrize('folder,suffix,mode,output_suffix', [
     ('GameCube', '.gcm', 'rvz', '.rvz'), ('Wii', '.iso', 'rvz', '.rvz'),
-    ('Xbox', '.iso', 'xiso', '.xiso.iso'), ('n3ds', '.cci', 'trim3ds', '.trim.3ds'),
+    ('Xbox', '.iso', 'xiso', '.xiso.iso'), ('n3ds', '.cci', 'trim3ds', '.trim.cci'),
 ])
 def test_single_image_routing_requires_a_stable_recognized_image(tmp_path, folder, suffix, mode, output_suffix):
     root = tmp_path.resolve()

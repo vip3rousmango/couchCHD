@@ -38,6 +38,24 @@ def test_quarantine_and_undo_survive_restart(tmp_path):
     assert retained.read_bytes() == b'verified output'
 
 
+@pytest.mark.parametrize('extension', ['.cso', '.rvz', '.7z', '.xiso.iso', '.trim.cci'])
+def test_game_artifact_proof_is_not_always_permission_to_remove_source(tmp_path, extension):
+    src = tmp_path / 'game.original'
+    src.write_bytes(b'physical media')
+    with Ledger(tmp_path) as db:
+        batch = db.begin()
+        output = publish(db, batch, tmp_path / ('game' + extension))
+        assert db.verified() == [output]
+        if extension in ('.xiso.iso', '.trim.cci'):
+            with pytest.raises(SafetyError):
+                db.quarantine(batch, src, outputs=[output])
+        else:
+            db.quarantine(batch, src, outputs=[output])
+        db.finish(batch)
+        db.undo()
+    assert src.read_bytes() == b'physical media' and not output.exists()
+
+
 def test_failed_or_racing_publication_never_claims_foreign_output(tmp_path):
     final = tmp_path / 'psx' / 'Game.chd'
     with Ledger(tmp_path) as ledger:

@@ -199,11 +199,13 @@ jobs:
           gh release create "$TAG" --repo "$REPO" --verify-tag "${visibility[@]}" --title "$title" --notes-file - ./* <<'NOTES'
           Hardware testing build, not device certification. Back up your library and test with disposable copies first.
 
+          Format support includes CHD, PSP CSO, Dolphin RVZ, original Xbox XISO, CARD1 3DS trimming, and single-ROM 7z for supported cartridge cores. XISO and trimmed 3DS always retain the original. Test emulator playback and existing saves before clearing any recoverable originals.
+
           Native Linux x86_64 AppImage, aarch64 tarball and aarch64 SquashFS (single-card Recalbox), built on Debian 12; 64-bit glibc 2.36+ userspace required. Qt also needs a working graphics/input stack; ARM devices without a desktop display need compatible EGL/KMS drivers. AArch64 architecture alone does not establish Pi, Android, distro or frontend compatibility. See INSTALL.txt in the bundles. rclone is optional.
 
           Verify downloaded files using the attached SHA256SUMS (`sha256sum --ignore-missing -c SHA256SUMS`). On public GitHub, verify the checksum manifest's provenance with `gh attestation verify SHA256SUMS --repo vip3rousmango/couchCHD`. For chdman alone, extract the architecture-specific tarball and run `sha256sum -c SHA256SUMS` inside its architecture directory.
 
-          Corresponding source: CouchCHD, MAME, static SDL, Qt, PySide, pygame-ce, PyInstaller and the AppImage runtime archives accompany these binaries. See SOURCES-*.txt, including the exact Debian source package versions, and notices in each package.
+          Corresponding source: CouchCHD, MAME, DolphinTool and its bundled dependencies, static SDL, Qt, PySide, pygame-ce, PyInstaller and the AppImage runtime sources accompany these binaries. See SOURCES-*.txt, the per-architecture Dolphin source archives, and notices in each package.
 
           Before a stable release: test launch from the device menu, gamepad-only navigation, conversion + verify + undo, suspend/resume and reboot persistence on actual target devices. Record OS/version, architecture, graphics stack, controller and results. Review notices and ensure continued access to the corresponding sources for redistributed libraries and wheel codecs.
           NOTES

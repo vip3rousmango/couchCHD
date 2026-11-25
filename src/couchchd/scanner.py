@@ -142,7 +142,7 @@ def _firmware_name(path: Path) -> bool:
 
 def is_input_name(path: Path, system: str) -> bool:
     name = path.name.casefold()
-    return (not name.startswith('.') and not name.endswith(('.trim.3ds', '.xiso.iso'))
+    return (not name.startswith('.') and not name.endswith(('.trim.3ds', '.trim.cci', '.xiso.iso'))
             and path.suffix.lower() in FORMATS.get(system, ()) and not _firmware_name(path))
 
 

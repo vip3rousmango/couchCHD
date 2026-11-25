@@ -73,6 +73,7 @@ printf '\nQt EGLFS/GBM binary: %s (SHA256 %s); source: Qt 6.7.3 archive above.\n
 cp -r "bin/$arch/licenses" "$app/notices/converter"
 cp "bin/$arch/"{PROVENANCE.txt,SHA256SUMS} "$app/notices/converter/"
 bash scripts/collect_upstream.sh "$work/sources" "$app/notices" "$out"
+bash scripts/package_rvz.sh "$app" "$out"
 cp "$work/wheels.json" packaging/requirements-linux.txt "$app/notices/"
 {
     echo "CouchCHD $(python -c 'from importlib.metadata import version; print(version("couchchd"))')"
@@ -117,6 +118,9 @@ touch -d '1 minute ago' roms/psx/{track.bin,Probe.cue}
 "${launch[@]}" --headless --root "$work/roms" --auto --system psx --keep-originals --preset silent
 test -s roms/psx/Probe.chd
 test -s roms/psx/track.bin
+if [[ ${COUCHCHD_RUN_TESTS:-0} == 1 ]]; then
+    bash "$root/scripts/smoke_formats.sh" "$root" "$work/env/bin/python" "$work/test-deps" "${launch[@]}"
+fi
 "$root/bin/$arch/chdman" verify -i roms/psx/Probe.chd
 # Confirm that the distributed Qt app actually maps a visible root window.
 # The release must still be tested with a physical controller/graphics stack.

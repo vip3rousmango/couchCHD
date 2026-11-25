@@ -14,7 +14,7 @@ _U32 = struct.Struct('<I')
 
 def _source(source: Path, system: str) -> None:
     if (system != '3ds' or source.suffix.lower() not in {'.3ds', '.cci'}
-            or source.name.lower().endswith('.trim.3ds') or not stat.S_ISREG(source.lstat().st_mode)):
+            or source.name.lower().endswith(('.trim.cci', '.trim.3ds')) or not stat.S_ISREG(source.lstat().st_mode)):
         raise ValueError('Trimming requires an original regular 3DS/CCI cartridge image')
 
 
@@ -119,8 +119,8 @@ def _verify(source, target, cancel, on_stage):
 def convert(source: Path, target: Path, *, cancel, threads: int, on_stage=None) -> None:
     """Copy without decryption or header edits, then verify the entire reconstructed cartridge."""
     _source(source, '3ds')
-    if not target.name.lower().endswith('.trim.3ds'):
-        raise ValueError('Trimmed cartridge output must have a distinct .trim.3ds suffix')
+    if not target.name.lower().endswith('.trim.cci'):
+        raise ValueError('Trimmed cartridge output must have a distinct .trim.cci suffix')
     if cancel.is_set():
         raise InterruptedError('3DS trimming cancelled')
     with source.open('rb') as original:

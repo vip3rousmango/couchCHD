@@ -47,6 +47,8 @@ CouchCHD detects target systems automatically via folder aliases (supporting Emu
 
 Here **Default** means standard CD hunk geometry. On portable devices, `createcd` may use the lossless `cdzl,cdfl` codec pair to avoid LZMA trial compression. This does not relax checksum or track-layout verification.
 
+**Additional verified formats:** The queue also supports PSP CSO (CHD remains the default), Dolphin RVZ for raw GameCube/Wii images, XISO for original Xbox full-disc dumps, trimmed read-only Nintendo 3DS cartridges, and single-ROM 7z archives for supported cartridge systems. See [accepted inputs and compatibility](README.md#formats-and-emulator-compatibility). XISO and trimming change the physical layout; both always retain the original. Neither a checksum nor successful conversion establishes emulator, save, or achievement compatibility.
+
 \---
 
 \#\# 4\. Multi-Disc Grouping & \`.m3u\` Automation  

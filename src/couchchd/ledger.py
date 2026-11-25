@@ -20,6 +20,8 @@ import tempfile
 import unicodedata
 from collections.abc import Callable, Iterable
 
+from .output_formats import can_replace_source, is_output
+
 
 class SafetyError(ValueError):
     """Filesystem state doesn't match the journal; leave both copies alone."""
@@ -310,8 +312,8 @@ class Ledger:
         src = self._library(src)
         row = self.db.execute("SELECT dstmark FROM ops WHERE dst=? AND state='done' ORDER BY id DESC LIMIT 1",
                               (self._rel(src),)).fetchone()
-        if src.suffix.casefold() == '.chd' and row is None:
-            raise SafetyError(f'Untracked CHD: {src}')
+        if is_output(src) and row is None:
+            raise SafetyError(f'Untracked game output: {src}')
         self._record(batch, 'move', src, self._library(dst), required_mark=row[0] if row else None)
 
     def save_metadata(self, batch: int, src: Path, *, expected) -> None:
@@ -323,13 +325,13 @@ class Ledger:
         src = self._library(path)
         query = "SELECT id,dst,dstmark,dstctime FROM ops WHERE batch=? AND kind='publish' AND state='done'"
         if outputs is None:
-            rows = [r for r in self.db.execute(query, (batch,)) if Path(r['dst']).suffix.casefold() == '.chd']
+            rows = [r for r in self.db.execute(query, (batch,)) if can_replace_source(Path(r['dst']))]
         else:
             rows = []
             for p in set(outputs):
                 p = self._library(p)
                 row = self.db.execute(query + ' AND dst=?', (batch, self._rel(p))).fetchone()
-                if row is None or p.suffix.casefold() != '.chd':
+                if row is None or not can_replace_source(p):
                     raise SafetyError(f'No verified output in this batch: {p}')
                 rows.append(row)
         if not rows:
@@ -351,7 +353,7 @@ class Ledger:
         op, kind = row['id'], row['kind']
         src, dst = self._path(row['src']), self._path(row['dst'])
         generated = kind == 'publish'
-        keep = generated and dst.suffix.casefold() == '.chd'
+        keep = generated and is_output(dst)
         if keep:
             src = self._path(self.root / '_couchchd_backup' / '.undo' / str(row['batch']) / self._rel(dst))
         elif generated:
@@ -413,7 +415,7 @@ class Ledger:
         """Follow verified outputs through relocations, including later batches."""
         live = {}
         for row in self.db.execute("SELECT * FROM ops WHERE state='done' AND kind IN ('publish','move') ORDER BY id"):
-            if row['kind'] == 'publish' and Path(row['dst']).suffix.casefold() == '.chd':
+            if row['kind'] == 'publish' and is_output(Path(row['dst'])):
                 live[row['dst']] = row['id'], row['dstmark'], row['dstctime']
             elif row['kind'] == 'move':
                 prior = live.pop(row['src'], None)

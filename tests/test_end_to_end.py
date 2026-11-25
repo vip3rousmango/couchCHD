@@ -197,7 +197,7 @@ def test_derivatives_preserve_sources_even_with_immediate_cleanup(tmp_path, monk
     paused = app.run(systems={'xbox'}, immediate=True)
     assert paused['paused'] and not paused['converted']
     monkeypatch.setattr(hardware, 'free_bytes', lambda _: 20 * 1024**3)
-    outputs = {str(xbox / 'Game.xiso.iso'), str(n3ds / 'Game.trim.3ds')}
+    outputs = {str(xbox / 'Game.xiso.iso'), str(n3ds / 'Game.trim.cci')}
     result = app.run(systems={'xbox', '3ds'}, immediate=True)
     assert not result['errors'] and not result['paused'] and set(result['converted']) == outputs, result
     snapshot = app.scan()

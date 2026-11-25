@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "couchchd"
 dynamic = ["version"]
-description = "Controller-first, verified CHD compression and reversible ROM library management"
+description = "Controller-first, verified ROM compression and reversible library management"
 requires-python = ">=3.11"
 license = "GPL-3.0-only"
 license-files = ["LICENSE"]

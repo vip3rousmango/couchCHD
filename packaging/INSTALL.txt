@@ -55,14 +55,15 @@ https://gitlab.com/recalbox/recalbox/-/blob/10.1.2/projects/frontend/es-app/src/
 https://gitlab.com/recalbox/recalbox/-/blob/10.1.2/projects/frontend/es-app/src/emulators/run/GameRunner.cpp
 https://gitlab.com/recalbox/recalbox/-/blob/10.1.2/projects/frontend/data/resources/menu.xml
 
-Both packages include Python, the Qt/QML runtime, SDL controller support and
-one architecture-matched static chdman. rclone and a configured remote are
-optional only for cloud pulls. Host kernel, glibc, device access, fonts and
+The Linux bundles include Python, Qt/QML, SDL controller support, chdman for
+CHD, and DolphinTool for lossless GameCube/Wii RVZ. CSO, 7z, trimmed 3DS and
+original Xbox repacking do not require installing another converter. rclone
+is optional for cloud pulls. Host kernel, glibc, device access, fonts and
 working graphics/input drivers remain platform requirements. A native Linux CI
 build and Xvfb window test do not certify a particular Recalbox or gamescope
 release. Verify on copied, disposable media before using your ROM library.
 
-Licenses and corresponding source: see notices/SOURCES.txt, notices/converter,
+Licenses and corresponding source: see notices/SOURCES.txt, notices/converter, notices/rvz,
 notices/common-licenses, project LICENSE, build source archives, and the source
 repository at the exact revision recorded in BUILD.txt. Shared libraries are
 unmodified and replaceable; extract the AppImage as above or unpack the tarball,

@@ -1,4 +1,4 @@
-"""Run chdman on validated inputs and only publish complete, verified outputs."""
+"""Convert in a private directory; only publish complete, verified game images."""
 from __future__ import annotations
 
 import errno
@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import hardware
+from .output_formats import SUFFIX_BY_MODE
 from .ledger import install_new
 from .scanner import FileLine, Game, inspect
 from .telemetry import StageSampler
@@ -275,7 +276,50 @@ def _sync(path: Path) -> None:
         os.fsync(file.fileno())
 
 
-def convert(game: Game, output: Path, tool: Path, *, cancel: threading.Event, threads: int,
+def _write_image(game, partial, work, tool, cancel, threads, progress, on_stage, device_cpus, fast_cd):
+    if game.mode not in ('createcd', 'createdvd'):
+        from . import archive7z, cso, rvz, trim3ds, xiso
+
+        codec = {'7z': archive7z, 'cso': cso, 'rvz': rvz, 'trim3ds': trim3ds, 'xiso': xiso}[game.mode]
+        last = None
+
+        def report(stage, percent=None):
+            nonlocal last
+            if on_stage is not None:
+                on_stage(stage, percent)
+            if progress is not None:
+                key = (stage, int(percent) if percent is not None else None)
+                if key != last:
+                    suffix = '' if key[1] is None else f' ({key[1]}%)'
+                    progress(f'{stage.capitalize()}: {game.source.name}{suffix}')
+                    last = key
+
+        codec.convert(game.source, partial, cancel=cancel, threads=threads,
+                      on_stage=report if progress is not None or on_stage is not None else None)
+        return
+
+    tool = tool.resolve(strict=True) if tool is not None else tool_path()
+    _version(tool, work, cancel)
+    source = _input(game, work, cancel)
+    # CD units carry subcode and are padded to groups of four; DVD units are 2048 bytes.
+    logical_bytes = (game.frames[0] * 2048 if game.mode == 'createdvd' else
+                     sum((frames + 3) // 4 * 4 for frames in game.frames) * 2448) if on_stage else 0
+    if game.mode == 'createdvd':
+        flags = ['-hs', '2048', '-c', 'zlib']
+    else:
+        flags = ['-c', 'cdzl,cdfl'] if fast_cd else []
+    _run(tool, game.mode, '-i', source, '-o', partial, *flags, '-np', str(threads),
+         cwd=work, cancel=cancel, progress=progress, disc=game.source.name,
+         on_stage=on_stage, logical_bytes=logical_bytes, device_cpus=device_cpus)
+    _nonempty(partial)
+    _verify(tool, partial, work, cancel, progress=progress, disc=game.source.name,
+            on_stage=on_stage, logical_bytes=logical_bytes, device_cpus=device_cpus)
+    flags = ['-v'] if game.mode == 'createcd' else []
+    report = _run(tool, 'info', '-i', partial, *flags, cwd=work, cancel=cancel)
+    _match(game, report.text)
+
+
+def convert(game: Game, output: Path, tool: Path | None = None, *, cancel: threading.Event, threads: int,
             progress: Callable[[str], None] | None = None, on_stage=None, device_cpus: int = 0,
             fast_cd: bool = False) -> None:
     if threads < 1:
@@ -285,34 +329,14 @@ def convert(game: Game, output: Path, tool: Path, *, cancel: threading.Event, th
         raise FileExistsError(output)
     game.assert_unchanged()
     base = _workdir(output.absolute().parent)
-    tool = tool.resolve(strict=True)
+    if game.mode not in SUFFIX_BY_MODE:
+        raise ValueError(f'Unsupported conversion mode: {game.mode}')
     try:
         with tempfile.TemporaryDirectory(prefix='convert-', dir=base) as tmp:
             work = Path(tmp)
-            _version(tool, work, cancel)
-            source = _input(game, work, cancel)
-            partial = work / (game.source.stem + '.chd.part')
-            logical_bytes = 0
-            if on_stage is not None:
-                # CHD CD tracks contain data + subcode in 2448-byte units,
-                # padded to 4 frames per track. DVD units hold 2048 bytes.
-                logical_bytes = (game.frames[0] * 2048 if game.mode == 'createdvd' else
-                                 sum((frames + 3) // 4 * 4 for frames in game.frames) * 2448)
-            if game.mode == 'createdvd':
-                flags = ['-hs', '2048', '-c', 'zlib']
-            else:
-                # Skip LZMA trials on portables. Keep FLAC for audio tracks
-                # and chdman's standard CD hunk geometry for every system.
-                flags = ['-c', 'cdzl,cdfl'] if fast_cd else []
-            _run(tool, game.mode, '-i', source, '-o', partial, *flags, '-np', str(threads),
-                 cwd=work, cancel=cancel, progress=progress, disc=game.source.name,
-                 on_stage=on_stage, logical_bytes=logical_bytes, device_cpus=device_cpus)
+            partial = work / ('output' + SUFFIX_BY_MODE[game.mode])
+            _write_image(game, partial, work, tool, cancel, threads, progress, on_stage, device_cpus, fast_cd)
             _nonempty(partial)
-            _verify(tool, partial, work, cancel, progress=progress, disc=game.source.name,
-                    on_stage=on_stage, logical_bytes=logical_bytes, device_cpus=device_cpus)
-            flags = ['-v'] if game.mode == 'createcd' else []  # Never compare truncated track metadata.
-            report = _run(tool, 'info', '-i', partial, *flags, cwd=work, cancel=cancel)
-            _match(game, report.text)
             _sync(partial)
             game.assert_unchanged()
             _cancelled(cancel)
@@ -321,6 +345,10 @@ def convert(game: Game, output: Path, tool: Path, *, cancel: threading.Event, th
         if exc.errno == errno.ENOSPC:
             cancel.set()  # Other workers will kill and reap their own active chdman.
         raise
+
+
+_PRIVATE_OUTPUTS = frozenset('output' + ext for ext in SUFFIX_BY_MODE.values())
+_STAGED_OUTPUT = re.compile(r'[0-9a-f]{32}(?:' + '|'.join(re.escape(ext) for ext in set(SUFFIX_BY_MODE.values())) + r')\.part')
 
 
 def recover(root: Path) -> None:
@@ -332,8 +360,9 @@ def recover(root: Path) -> None:
             continue
         for name in files:
             item = path / name
-            owned = name.endswith('.chd.part') or internal and re.fullmatch(
-                r'input\.(?:cue|gdi)|track\d{4}\.bin|(?:disc|publish)\.cue|disc(?: \(Track \d+\))?\.bin', name)
+            owned = name.endswith('.chd.part') or bool(_STAGED_OUTPUT.fullmatch(name)) or internal and (
+                name in _PRIVATE_OUTPUTS or re.fullmatch(
+                    r'input\.(?:cue|gdi)|track\d{4}\.bin|(?:disc|publish)\.cue|disc(?: \(Track \d+\))?\.bin', name))
             if owned and stat.S_ISREG(item.lstat().st_mode):
                 item.unlink()
         if internal and not any(path.iterdir()):
