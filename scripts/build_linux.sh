@@ -47,6 +47,7 @@ sdl=$(python -c 'import sysconfig; print(sysconfig.get_path("platlib") + "/pygam
 python -m PyInstaller --clean --noconfirm --onedir --name couchchd --noupx \
     --specpath "$work" --workpath "$work/build" --distpath "$work/frozen" \
     --collect-data couchchd.ui --copy-metadata couchchd \
+    --add-data "$root/scripts/install-device.sh:installer" \
     --hidden-import PySide6.QtQuick --hidden-import PySide6.QtQuickControls2 --hidden-import PySide6.QtSvg \
     --hidden-import pygame._sdl2.controller --hidden-import pygame.mixer \
     --add-binary "$sdl:pygame_ce.libs" \
@@ -54,6 +55,7 @@ python -m PyInstaller --clean --noconfirm --onedir --name couchchd --noupx \
     --add-binary "$qt/lib/$gbm.6:PySide6/Qt/lib" \
     --add-binary "$COUCHCHD_CHDMAN:bin/$arch" "$root/packaging/launcher.py"
 app="$work/frozen/couchchd"
+cmp scripts/install-device.sh "$app/_internal/installer/install-device.sh"
 # Load the delivered KMS plugin and its complete link closure without a display.
 # Xvfb alone only exercises xcb; this still does not test an actual KMS device.
 LD_LIBRARY_PATH="$app/_internal:$app/_internal/PySide6/Qt/lib" /usr/bin/python3 -I -c \
