@@ -57,10 +57,11 @@ def test_queue_samples_change_only_the_right_roles_and_row():
 
 @pytest.mark.parametrize(('size', 'source'), [('1280x800', 'local'), ('960x540', 'cloud')])
 def test_queue_scene_navigation_and_results(tmp_path, size, source):
+    paths = (str(Path(bridge.__file__).parents[2]), os.environ.get('PYTHONPATH'))
     subprocess.run([sys.executable, __file__, '--size', size, '--source', source,
                     '--capture', str(tmp_path / 'queue.png')], check=True, timeout=35,
                    env=dict(os.environ, QT_QPA_PLATFORM='offscreen', QT_QUICK_BACKEND='software',
-                            PYTHONPATH=str(Path(bridge.__file__).parents[2])))
+                            PYTHONPATH=os.pathsep.join(filter(None, paths))))
 
 
 def until(check, message, seconds=8):

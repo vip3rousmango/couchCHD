@@ -2,7 +2,7 @@
 # No arguments: install the pinned GitHub release. SSH transports are optional.
 set -eu
 umask 077
-channel=v0.1.0-preview.5
+channel=v0.1.0-preview.6
 fail() { printf 'CouchCHD: %s\n' "$*" >&2; exit 1; }
 fetch() {
     curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
