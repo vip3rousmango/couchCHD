@@ -9,11 +9,14 @@ import shutil
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
 _SYS = Path('/sys')
 _MOUNTINFO = Path('/proc/self/mountinfo')
+_MEMINFO = Path('/proc/meminfo')
+_worker = threading.local()
 _ESCAPE = re.compile(rb'\\([0-7]{3})')
 
 
@@ -79,6 +82,19 @@ def cpu_count() -> int:
         return os.cpu_count() or 1
 
 
+def memory_bytes() -> int | None:
+    """Usable physical RAM (not free pages, which fluctuate during a batch)."""
+    try:
+        with _MEMINFO.open('rb') as meminfo:
+            for line in meminfo:
+                if line.startswith(b'MemTotal:'):
+                    match = re.fullmatch(rb'MemTotal:\s+(\d+)\s+kB\s*', line)
+                    return int(match[1]) * 1024 if match else None
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def _text(path: Path) -> str:
     try:
         return path.read_text('ascii').strip().lower()
@@ -115,10 +131,11 @@ def on_battery() -> bool:
     return _power()[0]
 
 
-def _overheated() -> bool:
+def _overheated(*, portable: bool = False) -> bool:
     def hot(sensor: Path) -> bool:
         try:
-            return int(_text(sensor)) > 88_000
+            value = int(_text(sensor))
+            return value >= 80_000 if portable else value > 88_000
         except ValueError:
             return False
     for zone in (_SYS / 'class/thermal').glob('thermal_zone*'):
@@ -126,10 +143,89 @@ def _overheated() -> bool:
         if any(key in kind for key in ('cpu', 'pkg', 'soc', 'acpitz')) and hot(zone / 'temp'):
             return True
     for chip in (_SYS / 'class/hwmon').glob('hwmon*'):
-        if _text(chip / 'name') in ('k10temp', 'zenpower', 'coretemp', 'cpu_thermal'):
+        name = _text(chip / 'name')
+        if name in ('k10temp', 'zenpower', 'coretemp', 'cpu_thermal') or (portable and name == 'amdgpu'):
             if any(hot(sensor) for sensor in chip.glob('temp*_input')):
                 return True
     return False
+
+
+@contextmanager
+def portable_budget(threads: int, progress, cancel):
+    """Run ONLY on a dedicated batch pool thread. Children inherit its mask at fork/exec."""
+    allowed = None
+    mask = None
+    hot = _overheated(portable=True)
+    if hot:
+        threads = 1
+        progress('Thermal limit: starting on one CPU at 80°C or above.')
+    try:
+        allowed = os.sched_getaffinity(0)
+        mask = set(sorted(allowed)[-threads:])
+        if mask != allowed:
+            os.sched_setaffinity(0, mask)
+        threads = len(mask)
+    except (AttributeError, OSError):
+        # Sandboxes may deny changing affinity. -np still bounds compression
+        # workers, but is NOT a CPU ceiling (chdman has a separate I/O queue).
+        mask = None
+        threads = 1
+        progress('CPU affinity unavailable: using chdman -np 1 without a hard CPU ceiling.')
+
+    def fail_hot():
+        cancel.set()
+        raise InterruptedError('Thermal limit: cannot enforce one CPU; stopped with originals retained.')
+
+    def throttle(pid):
+        nonlocal hot
+        if mask is not None and len(mask) == 1:
+            return  # Already constrained before launch, including every helper.
+        if not hot and not _overheated(portable=True):
+            return
+        if mask is None:
+            fail_hot()
+        # Affinity on Linux applies to a TID, not an entire thread group.
+        # Pin the launcher too: verify/info must stay cool for the rest of this disc.
+        single = {min(mask)}
+        try:
+            if not hot:
+                os.sched_setaffinity(0, single)
+                hot = True
+                progress('Thermal limit: reducing this disc to one CPU (80°C or above).')
+            os.sched_setaffinity(pid, single)
+            with os.scandir(f'/proc/{pid}/task') as tasks:
+                for task in tasks:
+                    try:
+                        os.sched_setaffinity(int(task.name), single)
+                    except ProcessLookupError:
+                        pass  # A short-lived helper exited.
+        except ProcessLookupError:
+            pass  # The child exited; the next child inherits the single-CPU mask.
+        except FileNotFoundError:
+            if not Path('/proc/self/task').is_dir():  # procfs unavailable, not just an exited child
+                fail_hot()
+        except (AttributeError, OSError):
+            fail_hot()
+
+    _worker.throttle = throttle
+    try:
+        if hot and mask is None:
+            fail_hot()
+        yield threads
+    finally:
+        del _worker.throttle
+        if allowed is not None and mask is not None and (allowed != mask or hot):
+            try:
+                os.sched_setaffinity(0, allowed)
+            except (AttributeError, OSError):
+                pass  # CPU hotplug/cpuset change: keep the kernel's current, narrower mask.
+
+
+def throttle_child(pid: int) -> None:
+    """Polled by the same worker monitoring its live chdman; desktop policy is unchanged."""
+    throttle = getattr(_worker, 'throttle', None)
+    if throttle is not None:
+        throttle(pid)
 
 
 def _suspend_clock_offset() -> float:

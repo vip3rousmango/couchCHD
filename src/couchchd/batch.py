@@ -59,9 +59,9 @@ class Job:
 
 
 class Batch:
-    def __init__(self, root, scratch, db, batch, tool, guard, cores, quarantine, immediate, progress, cancel):
+    def __init__(self, root, scratch, db, batch, tool, guard, plan, quarantine, immediate, progress, cancel):
         self.root, self.scratch, self.db, self.batch = root, scratch, db, batch
-        self.tool, self.guard, self.cores = tool, guard, max(1, cores)
+        self.tool, self.guard, self.plan = tool, guard, plan
         self.quarantine, self.progress, self.cancel = quarantine, progress, cancel
         self.immediate = immediate
         self.outputs = []
@@ -92,11 +92,20 @@ class Batch:
             converter.convert(game, target, self.tool, cancel=self.cancel, threads=threads, progress=self.progress)
         job.game.assert_unchanged()
 
+    def _run_job(self, job, work, stage, target, threads):
+        # Never change the UI/coordinator's CPU affinity. Restrict only the
+        # executor thread that will spawn chdman, before native threads exist.
+        budget = (hardware.portable_budget(threads, self.progress, self.cancel) if self.plan.portable
+                  else nullcontext(threads))
+        with budget as cpus:
+            self._prepare(job, work, stage, target, cpus)
+
     def _publish(self, job, prepared):
         if self.cancel.is_set():
             raise InterruptedError('Batch cancelled; input retained.')
         job.game.assert_unchanged()
         size = prepared.stat().st_size
+        self.progress(f'Publishing: {job.output.name}')
         self.db.publish(self.batch, job.output, lambda stage: publish_prepared(prepared, stage))
         self.outputs.append(job.output)
         # Count distinct input files: shared tracks do not represent duplicate savings.
@@ -139,9 +148,9 @@ class Batch:
         reserved = Counter()
         active = {}
         previous_reason = ''
-        # Split CPU only when independent games exist. Never dedicate dozens of
-        # parallel random writers to a single SD card even on a many-core host.
-        width = min(len(jobs), self.cores, 4)
+        # One portable disc owns the available compression CPUs; an entire
+        # library on an SD card must not become competing random writers.
+        width = 1 if self.plan.portable else min(len(jobs), self.plan.cpus, 4)
         with ThreadPoolExecutor(max_workers=width) as pool:
             try:
                 while pending or active:
@@ -154,7 +163,8 @@ class Batch:
                     if reason.lower().startswith(('suspend', 'resume')) and not self.cancel.is_set():
                         self.cancel.wait(0.25)
                         continue  # do not publish finished jobs during the remount window
-                    cap = min(width, self.guard.limit())
+                    cpus = self.plan.cpus if self.plan.portable else min(self.plan.cpus, self.guard.limit())
+                    cap = min(width, cpus)
                     while (pending and len(active) < cap and not self.cancel.is_set()
                            and not self.paused and not reason):
                         job = pending[0]
@@ -178,9 +188,9 @@ class Batch:
                                     self.progress(self.paused)
                                 break
                             target = work / (uuid.uuid4().hex + '.chd.part')
-                            self.progress(f'Compressing: {job.game.source.name}')
+                            self.progress(f'Preparing: {job.game.source.name}')
                             dest_identity = fingerprint(job.output.parent)[:2]
-                            future = pool.submit(self._prepare, job, work, stage, target, max(1, min(self.guard.limit(), self.cores) // cap))
+                            future = pool.submit(self._run_job, job, work, stage, target, cpus // cap)
                             active[future] = job, target, needs, dest_identity
                             for dev, (_, amount) in needs.items():
                                 reserved[dev] += amount

@@ -110,7 +110,7 @@ class Backend:
             tool = converter.tool_path()
             scratch = Path(tmp)
             batch = db.begin()
-            worker = Batch(self.root, scratch, db, batch, tool, guard, profiles.worker_limit(preset),
+            worker = Batch(self.root, scratch, db, batch, tool, guard, profiles.compression_plan(preset),
                            quarantine, immediate, progress, cancel)
             messages = []
             try:

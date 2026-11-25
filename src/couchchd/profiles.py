@@ -1,10 +1,14 @@
 """Library discovery and hardware-appropriate defaults; preferences remain overridable."""
 from __future__ import annotations
 
+import os
+import platform
 import re
 import shutil
 import stat
 import subprocess
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import hardware
@@ -14,6 +18,7 @@ _RECALBOX = Path('/recalbox/share')
 _BATOCERA_ROMS = Path('/userdata/roms')
 _ROCKNIX_ROMS = Path('/storage/roms')
 _MODEL = Path('/proc/device-tree/model')
+_DMI = Path('/sys/class/dmi/id')
 _MEDIA = Path('/run/media')
 
 
@@ -65,12 +70,53 @@ def default_preset() -> str:
     return 'silent' if hardware.on_battery() else 'balanced'
 
 
-def worker_limit(preset: str) -> int:
+@dataclass(frozen=True)
+class CompressionPlan:
+    cpus: int
+    portable: bool
+
+
+def _steam_deck() -> bool:
+    if os.environ.get('SteamDeck') == '1':
+        return True
+    # LCD and OLED Decks expose these model names regardless of the distro.
+    for name in ('product_name', 'board_name'):
+        try:
+            model = (_DMI / name).read_text('ascii').strip().lower()
+        except (OSError, UnicodeError):
+            continue
+        if model in {'jupiter', 'galileo', 'steam deck', 'steam deck oled'}:
+            return True
+    try:
+        return platform.freedesktop_os_release().get('ID') == 'steamos'
+    except (OSError, UnicodeError):
+        return False
+
+
+def compression_plan(preset: str) -> CompressionPlan:
     quarters = {'silent': 2, 'balanced': 3, 'docked': 4}
     if preset not in quarters:
         raise ValueError(f'Unknown thermal preset: {preset}')
-    limit = max(1, hardware.cpu_count() * quarters[preset] // 4)
-    return min(2, limit) if is_pi() else limit
+    cpus = hardware.cpu_count()
+    budget = max(1, cpus * quarters[preset] // 4)
+    if sys.platform != 'linux':
+        return CompressionPlan(budget, False)
+
+    ram = hardware.memory_bytes()
+    pi = is_pi()
+    # Also protect small ARM boards with an unreadable device tree and
+    # low-RAM Linux systems. MemTotal excludes firmware/kernel reservations:
+    # 3 GiB separates 1/2 GiB Pi 4s from 4/8 GiB models.
+    arm_board = cpus <= 4 and platform.machine().lower() in ('arm64', 'aarch64', 'armv7l')
+    low_ram = ram is not None and ram < 3 * 1024**3
+    if not (pi or arm_board or (cpus <= 8 and low_ram) or _steam_deck()):
+        return CompressionPlan(budget, False)
+    budget = min(budget, max(1, (3 * cpus + 2) // 5))  # nearest logical CPU to 60%
+    if pi or arm_board:
+        budget = min(budget, 1 if ram is None or low_ram else 2)
+    elif low_ram:
+        budget = 1
+    return CompressionPlan(budget, True)
 
 
 def _supports_psp_chd() -> bool:

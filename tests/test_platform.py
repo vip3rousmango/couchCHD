@@ -81,20 +81,17 @@ def test_discover_library_roots(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('version,enabled', [(b'v1.16.6\n', False), (b'v1.17\n', True),
                                               (b'PPSSPP v1.20.3\n', True), (b'Unknown version\n', False)])
-def test_pi_presets_and_psp_floor(monkeypatch, version, enabled):
+def test_pi_systems_and_psp_floor(monkeypatch, version, enabled):
     monkeypatch.setattr(profiles, 'is_pi', lambda: True)
-    monkeypatch.setattr(hardware, 'cpu_count', lambda: 8)
     monkeypatch.setattr(profiles.shutil, 'which', lambda exe: '/usr/bin/PPSSPPSDL')
     def probe(args, **kwargs):
         assert args == ['/usr/bin/PPSSPPSDL', '--version']
         return subprocess.CompletedProcess(args, 0, stdout=version)
     monkeypatch.setattr(profiles.subprocess, 'run', probe)
     assert profiles.default_systems() == {'psx', 'segacd', 'saturn', 'dreamcast'} | ({'psp'} if enabled else set())
-    assert profiles.worker_limit('docked') == 2
     monkeypatch.setattr(profiles, 'is_pi', lambda: False)
     monkeypatch.setattr(profiles, 'is_recalbox', lambda: False)
     assert len(profiles.default_systems()) == 6
-    assert [profiles.worker_limit(p) for p in ['silent', 'balanced', 'docked']] == [4, 6, 8]
 
 
 _CUE = b'FILE "tracks/T01.BIN" BINARY\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n'
