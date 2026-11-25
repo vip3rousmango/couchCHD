@@ -15,6 +15,19 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Open the published AppImage without OpenGL using the installed launcher
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xvfb xauth xdotool
+          export XDG_DATA_HOME="$RUNNER_TEMP/desktop-data"
+          env -u DISPLAY -u WAYLAND_DISPLAY sh scripts/install-device.sh
+          xvfb-run -a -s '-screen 0 1280x800x24 -extension GLX' bash -eu -c '
+            export XDG_SESSION_TYPE=wayland WAYLAND_DISPLAY=unavailable QT_XCB_GL_INTEGRATION=none
+            "$XDG_DATA_HOME/couchchd/run-couchchd" >"$RUNNER_TEMP/window.log" 2>&1 &
+            pid=$!
+            trap "kill $pid 2>/dev/null || :; cat \"$RUNNER_TEMP/window.log\"" EXIT
+            timeout 60 xdotool search --sync --onlyvisible --name "^CouchCHD"
+          '
       - name: Stage the unmodified installer
         run: install -Dm644 scripts/install-device.sh public/i
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

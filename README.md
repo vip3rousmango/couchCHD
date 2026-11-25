@@ -16,6 +16,8 @@ The installer selects the x86-64 AppImage or aarch64 Linux tarball from the pinn
 
 Desktop Linux gets an Applications menu entry and launches immediately if a graphical display is available. On appliances the installer registers the launcher, tells you how to refresh the menu, and leaves the current frontend running. Setup does not convert or purge anything.
 
+**Steam Deck: installed but no window?** If Konsole printed `Failed to initialize graphics backend for OpenGL`, rerun the short installer above in Desktop Mode. It refreshes the existing launcher to use Qt Quick software rendering, without removing your library or settings. Search for **CouchCHD** in the KDE application launcher; in ES-DE, rescan the ROM directory and look under **Ports**. Installing does not automatically add a Steam library shortcut.
+
 | Detected frontend | Where to launch CouchCHD |
 | --- | --- |
 | [Recalbox EmulationStation](https://wiki.recalbox.com/en/advanced-usage/systems-display) | **Ports → CouchCHD** via a custom port system, not a Settings plugin. Restart Recalbox normally to reload the system list. Enable **Show Ports System** if hidden. |

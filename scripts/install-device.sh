@@ -92,7 +92,22 @@ install() {
     else
         "$final/run" --version >&2 || fail "Previously installed build at $final cannot start."
     fi
-    printf '%s\n' '#!/bin/sh' '# CouchCHD managed launcher' "exec \"\$(dirname \"\$0\")/builds/${final##*/}/run\" \"\$@\"" > "$tmp/entry"
+    {
+        printf '%s\n' '#!/bin/sh' '# CouchCHD managed launcher'
+        if [ "$arch:$frontend" = x86_64:desktop ]; then
+            cat <<'GRAPHICS'
+# This Qt Quick UI does not need a GPU. Avoid requiring a working EGL/GLX
+# driver in the AppImage just to open the library window on SteamOS.
+if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && [ -z "${QT_QUICK_BACKEND:-}${QSG_RHI_BACKEND:-}" ]; then
+    export QT_QUICK_BACKEND=software
+    if [ -n "${DISPLAY:-}" ] && [ -z "${QT_QPA_PLATFORM:-}" ]; then
+        export QT_QPA_PLATFORM=xcb
+    fi
+fi
+GRAPHICS
+        fi
+        printf '%s\n' "exec \"\$(dirname \"\$0\")/builds/${final##*/}/run\" \"\$@\""
+    } > "$tmp/entry"
     chmod 755 "$tmp/entry"; mv -f "$tmp/entry" "$launcher"
     cleanup; trap - EXIT HUP INT TERM
     printf 'Installed. Relaunch with: %s\n' "$launcher" >&2
