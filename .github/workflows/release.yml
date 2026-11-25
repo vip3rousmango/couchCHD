@@ -129,7 +129,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends exfatprogs
           sudo modprobe loop
           sudo modprobe squashfs
-          truncate -s 1G "$RUNNER_TEMP/share.exfat"
+          # Exercise the production 2 GiB library reserve; never lower it for CI.
+          truncate -s 4G "$RUNNER_TEMP/share.exfat"
           mkfs.exfat "$RUNNER_TEMP/share.exfat"
           sudo mount -t exfat -o loop,rw,fmask=0133,dmask=0022 "$RUNNER_TEMP/share.exfat" /recalbox/share
           sudo mkdir -p /recalbox/share/{system/.emulationstation,roms/ports}
