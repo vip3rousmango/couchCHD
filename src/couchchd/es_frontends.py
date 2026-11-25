@@ -258,7 +258,7 @@ def register(launcher: Path, *, roms: Path | None = None) -> list[str]:
     """Best effort: a broken/missing frontend does not invalidate the desktop install."""
     home = Path.home()
     messages = []
-    fallback = f'Use the desktop menu or add {launcher} to Steam as a non-Steam game.'
+    fallback = 'Use the desktop Applications menu.'
     try:
         if not stat.S_ISREG(_mode(launcher)) or not os.access(launcher, os.X_OK):
             raise ValueError(f'not an executable launcher: {launcher}')

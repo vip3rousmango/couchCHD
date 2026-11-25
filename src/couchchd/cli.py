@@ -1,4 +1,4 @@
-"""Headless commands never import Qt or SDL. Default unattended action: scan."""
+"""Library commands run without Qt or SDL. Default unattended action: scan."""
 
 import argparse
 import os
@@ -7,6 +7,7 @@ import signal
 import sqlite3
 import sys
 import threading
+import time
 from pathlib import Path
 
 from . import __version__, profiles
@@ -34,6 +35,34 @@ def _parser():
     return p
 
 
+def _register_desktop_steam(launcher: Path) -> str:
+    retry = ('With Steam closed, rerun the same install command or open CouchCHD from Applications '
+             'and choose Settings > Add to Steam.')
+    if os.environ.get('FLATPAK_ID'):
+        return 'Steam shortcut skipped: not registering a host launcher from inside Flatpak.'
+    try:
+        from .ui import steam
+        deadline = None
+        while True:
+            try:
+                return steam.register(launcher)
+            except steam.SteamRunning:
+                if deadline is None:
+                    print('Steam is running. In Desktop Mode, choose Steam > Exit.', file=sys.stderr, flush=True)
+                    # The installer is often piped into sh: stdin belongs to the script.
+                    if not sys.stderr.isatty():
+                        break
+                    print('Waiting up to 90 seconds to add CouchCHD after Steam exits…', file=sys.stderr, flush=True)
+                    deadline = time.monotonic() + 90
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(1, remaining))
+        return f'Steam shortcut deferred; the Applications menu launcher is ready. {retry}'
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        return f'Steam shortcut not registered: {exc} The Applications menu launcher is ready. {retry}'
+
+
 def main(argv=None):
     parser = _parser()
     args = parser.parse_args(argv)
@@ -56,6 +85,8 @@ def main(argv=None):
                 from . import es_frontends
                 print('Applications menu:', install_desktop(launcher))
                 messages = es_frontends.register(launcher, roms=args.root)
+                if sys.platform == 'linux':
+                    messages.append(_register_desktop_steam(launcher))
             elif frontend == 'recalbox':
                 from .recalbox_menu import register
                 if launcher.parts[-3:] != ('system', 'couchchd', 'run-couchchd'):
