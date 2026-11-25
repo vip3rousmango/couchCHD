@@ -11,9 +11,9 @@
 
 Make room for more games without losing track of your originals. CouchCHD is a controller-first ROM compressor for Steam Deck, Linux desktops and supported retro consoles. Convert a working copy, verify it, then decide what to keep. Already have a compressed game on another drive? Copy it instead of compressing it again.
 
-**Start here:** [Install](#install-from-github) · [Try one game](#first-run-try-one-game) · [Send to Android](#anbernic-rg405m--android--daijishō)
+**Start here:** [Install](#install-from-github) · [Will it run on my device?](#device-compatibility) · [Try one game](#first-run-try-one-game) · [Watch the queue](#compression-queue) · [Send to Android](#anbernic-rg405m--android--daijishō)
 
-**Field manual:** [Formats](#formats-and-emulator-compatibility) · [Mixed ZIP folders](#mixed-folders-loose-discs-and-zips) · [Home libraries & NAS](#reuse-compressed-games-across-devices) · [Space & cleanup](#make-room-without-guessing-which-originals-to-delete) · [Controller](#controller) · [Command line](#run-from-source)
+**Field manual:** [Formats](#formats-and-emulator-compatibility) · [Multidisc games](#multidisc-games-and-playlists) · [ZIPs](#mixed-folders-loose-discs-and-zips) · [Libraries & NAS](#reuse-compressed-games-across-devices) · [Health, space & undo](#make-room-without-guessing-which-originals-to-delete) · [Controller](#controller) · [CLI](#run-from-source)
 
 ## Install from GitHub
 
@@ -25,12 +25,17 @@ curl -f https://vip3rousmango.github.io/couchCHD/i | sh
 
 The installer verifies the download and sets up the launcher. **It does not convert or delete games.** On a Deck, don't use `sudo`. No clone, Python install or GitHub login needed. To inspect the script first, download it, read it, then run `sh install-device.sh`.
 
-| Where you're playing | Where to find CouchCHD |
-| --- | --- |
-| Steam Deck | **Gaming Mode → Library → Non-Steam → CouchCHD** |
-| Bazzite / KDE desktop | Search **CouchCHD** in Applications, or open **Utilities → CouchCHD** |
-| Pi 4 / Recalbox (64-bit) | Restart Recalbox, then open **Ports → CouchCHD** |
-| Android handheld | Install [CouchCHD Receive](https://vip3rousmango.github.io/couchCHD/receive/) instead. The APK receives games; the computer compresses them. |
+## Device compatibility
+
+**Where you compress a game and where you play it can be different.** You can compress a PS1 disc on Bazzite and send the CHD to an RG405M. For ANBERNIC models, check the full name and firmware: **RG Cube** runs Android, while a stock **RG CubeXX** uses a Linux card workflow. [Look up your model, firmware and player](docs/device-compatibility.md#find-your-anbernic-model-and-firmware).
+
+| Device or setup | What you can do | Where to start |
+| --- | --- | --- |
+| Steam Deck (SteamOS), Bazzite and compatible Linux desktops | Compress, verify, undo and send games. The published builds require x86-64 or ARM64 Linux with glibc 2.36+. | Deck: **Library → Non-Steam → CouchCHD**. KDE: **Applications → Utilities → CouchCHD**. |
+| Raspberry Pi 4 with 64-bit Recalbox | Convert locally on a compatible image, or pull a ready copy instead. A 32-bit Pi OS is not supported by the installer. | Install over SSH, restart Recalbox, open **Ports → CouchCHD**. [Other frontends](#launchers-and-updates) have different menu entries. |
+| Android 8+ handheld, including the RG405M | Receive selected games over Wi-Fi. The APK doesn't compress games or install an emulator. | Open [CouchCHD Receive](https://vip3rousmango.github.io/couchCHD/receive/) and choose the folder your player already uses. |
+| Linux handheld with a supported firmware/player profile | Export playable files to its mounted card. A card profile does **not** mean the device runs CouchCHD or accepts wireless transfers. | On the host, choose **Prepare a game pack**. [Find your firmware](docs/device-compatibility.md). |
+| Windows/macOS machine or an existing NAS | No native Windows or macOS release installer. A Linux host can still use a mounted library or a configured remote as a source. | [Browse or pull from a home library](#reuse-compressed-games-across-devices); leave the master read-only. |
 
 ## First run: try one game
 
@@ -39,6 +44,14 @@ The installer verifies the download and sets up the launcher. **It does not conv
 3. **Play the verified output in your emulator.** Load a save and, for a multidisc game, try a disc swap. Verification checks the image, not your player's compatibility. [Review backups](#make-room-without-guessing-which-originals-to-delete) before reclaiming space: **permanent cleanup ends Undo**.
 
 <img src="https://raw.githubusercontent.com/vip3rousmango/couchCHD/main/docs/systems.webp" alt="CouchCHD Systems screen with PlayStation selected in the controller-navigable console grid" width="600">
+
+## Compression queue
+
+Open a working library, select the games you want in **Dashboard → Queue**, then choose **Start batch**. Use the D-pad to browse individual jobs while they run. A disc can finish compression and still be **verifying**; the percentage is for the current stage, not the entire batch.
+
+<img src="https://raw.githubusercontent.com/vip3rousmango/couchCHD/main/docs/compression-queue.webp" alt="Live compression queue showing per-game stages and progress during a batch with generated test media" width="700">
+
+**Reading the numbers:** MiB/s estimates source data processed, not SD-card write speed. Device CPU is the job's share of total capacity; it stays blank when unavailable. This desktop run used seven generated discs, not commercial games. It isn't a Steam Deck benchmark: [recognized Decks and Pis run one disc at a time](#large-batches-on-a-deck-or-pi).
 
 ## Launchers and updates
 
@@ -151,6 +164,13 @@ The report does not scan ROMs, change files, or upload anything. If there's no s
 3. **Offer games.** Choose titles from one platform in a saved library or folder. The RG405M profile covers PS1, PSP and Dreamcast; choose another profile/player only if you need different formats.
 4. **Receive and play.** Choose Daijishō's existing platform folder (such as `ROMs/PSP`), then **Use this folder → Receive files**. Keep both apps open. After **Transfer complete**, choose **Sync** in Daijishō.
 
+<p>
+  <img src="https://raw.githubusercontent.com/vip3rousmango/couchCHD/main/docs/handheld-offer.webp" alt="Desktop: the handheld is connected and one game is selected. Offer selected games is ready." width="360">
+  <img src="https://raw.githubusercontent.com/vip3rousmango/couchCHD/main/docs/handheld-received.webp" alt="Android: Transfer complete, two files added; refresh PlayStation in Daijishō." width="360">
+</p>
+
+**Two sides of a transfer:** the desktop offers a selection; the handheld reports what it actually received. These are separate test runs: a desktop pairing session and the signed receiver running on an Android 12 emulator, not photos of a physical RG405M.
+
 <details>
 <summary>Nothing found? Check these before changing your network.</summary>
 
@@ -224,7 +244,13 @@ Choose a format for the **emulator that will play the game**, not just the small
 | Nintendo 3DS CARD1 `.3ds` / `.cci` | `.trim.cci` | Preserves cartridge content and removes known padding; uses the [CCI extension accepted by Azahar](https://azahar-emu.org/blog/game-loading-changes/). Trimming does not decrypt a game. Writable CARD2 and ambiguous images are not eligible. Always retains the input. |
 | Recognized single-cartridge ROMs for supported NES, SNES, Game Boy, GBA, N64, Mega Drive, Master System and Game Gear cores | `.7z` | One ROM per archive; verify the extracted bytes. Check that your frontend **and core** support archives. No arcade sets, BIOS collections, disc tracks or nested archives. |
 
-Multidisc organization is separate from compression. Don't assume that an emulator accepting CHD accepts M3U. After updating an EmuDeck library, rescan ES-DE or rerun Steam ROM Manager as appropriate. See [when to use CouchCHD alongside EmuDeck](docs/emudeck-comparison.md).
+Already use EmuDeck? Keep using it for emulator setup. After changing launch paths, rescan ES-DE or rerun Steam ROM Manager as appropriate. The [EmuDeck comparison](docs/emudeck-comparison.md) explains the different workflows; the table above lists CouchCHD's current formats.
+
+### Multidisc games and playlists
+
+**Want one library entry instead of “Disc 1” and “Disc 2”?** For **PlayStation, Sega CD, Saturn and Dreamcast**, CouchCHD can group numbered sibling CHDs it has verified. The `.m3u` is the entry you launch; the discs stay together in `.chd_discs/`. Open **Multi-disc & M3U** to inspect the playlist. Missing numbers, conflicting editions or an existing playlist are reasons to leave a set alone.
+
+Back up saves before changing the launch name. Open the playlist in your actual player, load an existing save and try a disc swap. A player that accepts CHD does not necessarily accept M3U. When transferring a supported set, select the **playlist** so its referenced discs go with it.
 
 ### Mixed folders: loose discs and ZIPs
 
@@ -273,10 +299,15 @@ couchchd --catalog-pull SOURCE_ID 'psx/Example.chd' --dest /games/roms
 
 Choose a writable **working library** for conversion. If Bazzite can see a Windows NTFS drive with your master dumps, leave it mounted read-only and use it as an ingest source, not the conversion destination. Health checks and handheld exports can read a separate source folder without opening its conversion ledger.
 
-1. Run a **library health check** before a big batch. Findings explain what to fix; they do not rewrite descriptors or delete tracks.
-2. **Plan space** for all or selected systems. The plan shows estimates and excludes games that cannot be staged safely. Original files and verified outputs coexist until you reclaim space. An estimate is not a promise that this many bytes will be freed.
-3. Run the plan, then launch the new output **in your emulator**. Check an existing save, music, and disc swaps when applicable. Mark the verified output as play-tested; unmark it if something fails. CouchCHD cannot infer a successful play-test from the game's checksum.
-4. Preview reviewed cleanup and read the file list and affected batches before confirming. Permanent deletion ends Undo for the affected batches. **Keep an independent copy** of originals you cannot replace.
+| What you're trying to do | Open this in CouchCHD |
+| --- | --- |
+| Find out why a game was skipped | **Dashboard → Library health check** reports missing tracks and broken playlist paths without editing them. |
+| Estimate how much room you can make | **Dashboard → Make room on this card** previews all or selected systems and excludes games that can't be staged safely. Originals and outputs coexist until cleanup; the estimate isn't free space yet. |
+| Reclaim space after testing | **History & backups → Play-test your games**, then **Review tested backups**. Test saves, music and disc swaps in the emulator; the app can't infer those from a checksum. |
+| Restore sources after a batch | **History & backups → Undo last batch** restores quarantined originals without overwriting conflicts. It cannot recover purged files. |
+| Get a playable BIN/CUE from a CD or GD-ROM CHD | In **Dashboard → Output files**, inspect the CHD and choose **Extract CD to BIN/CUE**. Extraction isn't Undo: it doesn't reproduce original filenames or descriptor text. |
+
+Before confirming cleanup, read the file list and affected batches. **Permanent deletion ends Undo for those batches.** Keep an independent copy of originals you can't replace.
 
 <details>
 <summary>Plan and reclaim space over SSH with a scoped cleanup token</summary>
@@ -336,13 +367,11 @@ Headless commands print JSON to stdout and progress/errors to stderr. Batch exit
 Treat the CPU budget and the compression speed as separate settings: using fewer CPUs leaves room for Gaming Mode, while doing less work per sector can make an ISO finish sooner. A busy CPU core can still show 100%; the converter's limit is relative to **all available logical CPUs**, not a guarantee about package temperature, power draw, or other applications.
 
 <details>
-<summary>CPU budgets, temperature limits and reading queue metrics</summary>
+<summary>CPU budgets and temperature limits on portable hardware</summary>
 
 Recognized Decks and Pis run **one disc at a time**, including verification. On an eight-thread Deck, Balanced and Docked allow the compressor five logical CPUs (62.5%); Silent allows four. A four-core Pi 4 allows two, or one on models with 2 GiB RAM or less or unknown memory. On these devices a detected temperature of 80°C or higher reduces the active conversion to one CPU for the rest of the disc. Limits rely on Linux CPU affinity and visible sensors; they are not a thermal guarantee.
 
 On Linux, portable conversion workers run at lower scheduling priority. When CPU topology is available, the compressor leaves one physical core and its SMT siblings available to the frontend if the process has access to another core. This leaves room for the controller and compositor; it does not set a frame rate or restrict other applications.
-
-During a batch, use the D-pad to browse individual discs. The percentage belongs to the current stage (compression or verification), not the entire batch. MiB/s is estimated logical disc data processed, not SD-card write speed. CPU is the converter's measured share of the device's available CPUs, not total system load. A blank metric means no measurement yet. Checking a row does not pause the converter.
 
 </details>
 
