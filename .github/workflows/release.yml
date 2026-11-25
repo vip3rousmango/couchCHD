@@ -201,6 +201,10 @@ jobs:
 
           Format support includes CHD, PSP CSO, Dolphin RVZ, original Xbox XISO, CARD1 3DS trimming, and single-ROM 7z for supported cartridge cores. XISO and trimmed 3DS always retain the original. Test emulator playback and existing saves before clearing any recoverable originals.
 
+          New library workflows: preview a space goal, check library health without editing ROMs, mark verified outputs after playing and reclaim only reviewed backups. Export complete RG405M playlists or pull an existing compressed game from a named mounted/rclone library without recompression or overwriting conflicting games. Mixed loose-disc and supported ZIP libraries process one archive at a time; PSP ZIP-to-CSO streams without writing an intermediate ISO. Original ZIPs are always retained.
+
+          ANBERNIC companion export profiles filter formats by firmware and confirmed player/core. Choose the card or game folder explicitly before copying. Android and older Linux devices need not run CouchCHD to receive games. Device and firmware research, caveats and a physical testing checklist are linked from the README. The optional --device-report installer mode does not install or send data.
+
           Native Linux x86_64 AppImage, aarch64 tarball and aarch64 SquashFS (single-card Recalbox), built on Debian 12; 64-bit glibc 2.36+ userspace required. Qt also needs a working graphics/input stack; ARM devices without a desktop display need compatible EGL/KMS drivers. AArch64 architecture alone does not establish Pi, Android, distro or frontend compatibility. See INSTALL.txt in the bundles. rclone is optional.
 
           Verify downloaded files using the attached SHA256SUMS (`sha256sum --ignore-missing -c SHA256SUMS`). On public GitHub, verify the checksum manifest's provenance with `gh attestation verify SHA256SUMS --repo vip3rousmango/couchCHD`. For chdman alone, extract the architecture-specific tarball and run `sha256sum -c SHA256SUMS` inside its architecture directory.

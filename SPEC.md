@@ -69,9 +69,10 @@ Designed for users who store uncompressed ROM archives in cloud storage (e.g., G
 1\. \*\*Optional \`rclone\` Remote Integration:\*\*  
    \* Auto-detect if \`rclone\` is configured on the system (e.g., \`gdrive:\`, \`nas:\`) or allow selecting a mounted cloud/SMB/NFS folder.  
 2\. \*\*Streamlined "Pull \-\> Compress \-\> Verify \-\> Purge Temp" Loop:\*\*  
-   \* Instead of downloading an entire 100 GB folder at once, CouchCHD pulls \*\*one game at a time\*\* into a local fast NVMe/RAM scratch folder (\`/tmp/couchchd\_ingest/\`).  
-   \* Compresses locally using full CPU cores, verifies the \`.chd\`, writes only the compact \`.chd\` to the SD card/ROM folder, and deletes the temporary uncompressed download before fetching the next game.  
-   \* Allows users to ingest massive cloud libraries onto a small SD card without ever needing double storage space.
+   * Ingest one remote game at a time into a private temporary workspace. Verify the converted output before publishing. Never change remote originals.
+   * Budget scratch and destination space separately by filesystem; temporary inputs and output may need to coexist. Retaining a local backup does not reclaim its space.
+3. **Reuse an existing compressed game:** register named mounted libraries or configured rclone sources. Cache last-seen inventories, distinguish offline entries, and pull a selected game or playlist pack without recompression. A match by name is not content identity. Never mirror deletions or overwrite a conflicting destination.
+4. **Handheld destinations:** a controller-selectable firmware/player profile filters export formats and determines the supported folder layout. This is distinct from native execution; unsupported or unknown emulator features must not be implied by a device model.
 
 \---
 
@@ -81,7 +82,7 @@ Designed for users who store uncompressed ROM archives in cloud storage (e.g., G
 Before touching any files, the scanner validates:  
 1\. \*\*Cue / GDI Track Resolution:\*\* Parse every \`FILE "..."\` line in \`.cue\` and track line in \`.gdi\`. Confirm all referenced \`.bin\`/\`.img\`/\`.raw\` files exist and are \`\> 0 bytes\`.  
 2\. \*\*Windows-to-Linux Case-Sensitivity Fix:\*\* Perform case-insensitive lookup for track filenames referenced inside \`.cue\` sheets. If casing differs (e.g., \`TRACK01.BIN\` vs \`track01.bin\`), generate an in-memory/temp \`.cue.tmp\` for \`chdman\` without altering the user's original \`.cue\`.  
-3\. \*\*Active Transfer & Archive Guard:\*\* Skip files with \`.part\`, \`.crdownload\`, \`.tmp\`, or modification times \`\< 10 seconds\` ago. Flag \`.zip\`/\`.7z\`/\`.rar\`/\`.ecm\`/\`.ape\`/\`.flac\` files cleanly in a \*\*"Needs Unpacking"\*\* tab rather than failing silently.  
+3. **Active transfer and archive guard:** skip partial or still-changing files. Inspect bounded single-disc ZIP packages in mixed local/mounted libraries. Stream a PSP ISO directly to CSO when selected; use private, capacity-checked storage for seekable inputs. Retain the outer ZIP in every cleanup policy. Report encrypted, nested, unsupported, or ambiguous layouts without automatically unpacking them.
 4\. \*\*Single-Instance Lockfile (\`couchchd.lock\`):\*\* Prevent concurrent instances from scanning or modifying the same ROM directory.
 
 \#\#\# 6.2 Atomic 4-Stage Conversion Pipeline  
@@ -92,7 +93,7 @@ Before touching any files, the scanner validates:
 5\. \*\*Stage 4 (Atomic Commit):\*\* Execute \`os.replace()\` to move \`\<GameName\>.chd.part\` \-\> \`\<system\_dir\>/\<GameName\>.chd\`.
 
 \#\#\# 6.3 Non-Destructive Cleanup ("Quarantine First" Policy)  
-\* \*\*Default \= Quarantine (\`\_couchchd\_backup/\`):\*\* Verified originals are moved to \`\<roms\_root\>/\_couchchd\_backup/\<system\>/\` rather than permanently deleted. Users reclaim space via an explicit \*\*"Purge Verified Backups"\*\* button once satisfied.  
+* **Quarantine first:** move eligible verified originals to the backup area. Keep machine verification separate from the player's play-test mark. Preview the exact backups and affected undo batches before irreversible reviewed cleanup; reject stale confirmation. The space planner must distinguish expected compression savings from free bytes on the library volume.
 \* \*\*Shared-Track Reference Protection:\*\* Before moving or deleting any \`.bin\` file, cross-check all other \`.cue\`/\`.gdi\` files in the directory. If two \`.cue\` files share a \`.bin\` track (common in \`1G1R\` / merged sets), never remove the shared track until all referencing \`.cue\` files are converted.  
 \* \*\*Transaction Ledger & One-Click Undo (\`couchchd\_history.db\`):\*\* Log every move/conversion in SQLite. Provide an \*\*"Undo Last Batch"\*\* button to restore quarantined files and unpack \`.m3u\` folders, plus a per-game \*\*"Extract Back to BIN/CUE"\*\* (\`chdman extractcd\`) option.
 
@@ -128,8 +129,8 @@ Input Mapping (SDL2 Standard Gamepad)
 • A (South): Confirm / Toggle item / Open modal.  
 • B (East): Back / Pause or Cancel batch (with confirmation dialog).  
 • X (West): Inspect game details, track list, or trigger Extract to BIN/CUE.  
-• Y (North): Primary Context Action (Scan Library \-\> Start Batch \-\> Purge Backups).  
-• LB / RB: Switch top-level tabs (Dashboard \| Systems \| Multi-Disc & M3U \| Cloud Ingest \| History & Backups).  
+• Y (North): primary context action (for example start a batch, open the catalog, or preview reviewed cleanup). A primary press alone must not purge backups.
+• LB / RB: switch top-level tabs (Dashboard | Systems | Multi-Disc & M3U | NAS / Cloud | History & Backups).
 • Start: Open Settings (Thermal Profile, Quarantine Policy, Add to Steam).
 
 UI Polish & Feedback

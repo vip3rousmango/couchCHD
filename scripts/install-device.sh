@@ -2,7 +2,7 @@
 # No arguments: install the pinned GitHub release. SSH transports are optional.
 set -eu
 umask 077
-channel=v0.1.0-preview.15
+channel=v0.1.0-preview.16
 recalbox=/recalbox
 media=/media
 mountinfo=/proc/self/mountinfo
@@ -360,8 +360,42 @@ check_update_source() {
     valid_digest "$previous" || fail 'The managed launcher has no valid build target.'
     check_build "$base/builds/$previous"
 }
+# No network, installation, ROM paths, hostnames, or device identifiers. This
+# must also work on the 32-bit/Android systems that cannot launch our bundle.
+device_report() {
+    name=unknown; release=unknown; model=unknown; bits=unknown; memory=unknown
+    if [ -r /etc/os-release ]; then
+        release=$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release | head -n 1 | tr -d '"')
+    fi
+    if command -v getprop >/dev/null 2>&1 && [ -n "$(getprop ro.build.version.sdk 2>/dev/null)" ]; then
+        name=Android
+        release=$(getprop ro.build.version.release)
+        model=$(getprop ro.product.model)
+    else
+        name=$(uname -s)
+        if [ -r /proc/device-tree/model ]; then model=$(tr -d '\000' < /proc/device-tree/model); fi
+    fi
+    if [ -r "/proc/$$/exe" ]; then
+        case $(od -An -tu1 -j4 -N1 "/proc/$$/exe" 2>/dev/null | tr -d '[:space:]') in
+            1) bits=32 ;; 2) bits=64 ;;
+        esac
+    fi
+    if [ -r /proc/meminfo ]; then memory=$(awk '/^MemTotal:/ {print $2 " KiB"; exit}' /proc/meminfo); fi
+    libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || libc=unknown
+    printf 'OS: %s\nRelease: %s\nModel: %s\nKernel architecture: %s\nShell bits: %s\nLibc: %s\nMemory: %s\n' \
+        "$name" "${release:-unknown}" "${model:-unknown}" "$(uname -m)" "$bits" "$libc" "$memory"
+    for tool in rclone PPSSPPSDL retroarch; do
+        if command -v "$tool" >/dev/null 2>&1; then found=yes; else found='not on PATH'; fi
+        printf '%s: %s\n' "$tool" "$found"
+    done
+    printf '%s\n' 'No install attempted. This report does not certify emulator playback or graphics support.'
+}
+
 platform() {
     [ "$(uname -s)" = Linux ] || fail 'A Linux target is required.'
+    if command -v getprop >/dev/null 2>&1 && [ -n "$(getprop ro.build.version.sdk 2>/dev/null)" ]; then
+        fail 'Android is a handheld export destination, not a native Linux install target. Use CouchCHD on your host.'
+    fi
     arch=$(uname -m)
     case $arch in
         x86_64) asset=CouchCHD-x86_64.AppImage ;;
@@ -593,6 +627,11 @@ STEAM_LOG
 if [ "${1:-}" = --channel ]; then
     [ "$#" = 1 ] || fail 'Unexpected channel arguments.'
     printf '%s\n' "$channel"
+    exit 0
+fi
+if [ "${1:-}" = --device-report ]; then
+    [ "$#" = 1 ] || fail 'Unexpected device report arguments.'
+    device_report
     exit 0
 fi
 install "$@"

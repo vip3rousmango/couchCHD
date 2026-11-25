@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import threading
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 from . import __version__, profiles, scanner
@@ -26,10 +27,33 @@ def _parser():
     actions.add_argument('--undo', action='store_true', help='restore originals from the most recent undoable batch')
     actions.add_argument('--purge', action='store_true', help='permanently purge verified backups (requires --yes)')
     actions.add_argument('--extract', metavar='CHD', type=Path, help='extract a CD image to a new BIN/CUE pair')
-    p.add_argument('--dest', type=Path, help='extraction directory for --extract')
+    actions.add_argument('--health', action='store_true', help='check for library issues without writing to the library')
+    actions.add_argument('--plan-gib', type=int, metavar='GIB', help='estimate recoverable space (0: all that fit)')
+    actions.add_argument('--apply-plan', type=Path, metavar='JSON', help='run an unchanged --plan-gib preview; never purge')
+    actions.add_argument('--review', action='store_true', help='list verified outputs and play-test IDs')
+    actions.add_argument('--mark-tested', metavar='ID', help='record your play-test of this verified output')
+    actions.add_argument('--unmark-tested', metavar='ID', help='clear a play-test mark')
+    actions.add_argument('--review-cleanup', action='store_true', help='preview reviewed original files and confirmation token')
+    actions.add_argument('--reclaim-reviewed', metavar='TOKEN', help='permanently remove exactly the reviewed backups (requires --yes)')
+    actions.add_argument('--handheld-profiles', action='store_true', help='list supported export profiles and player capabilities')
+    actions.add_argument('--handheld-list', action='store_true', help='list playable copies for the selected export profile')
+    p.add_argument('--handheld-profile', metavar='PROFILE', help='destination firmware/profile ID (default: RG405M)')
+    p.add_argument('--handheld-player', metavar='PLAYER', action='append', help='confirmed player ID; repeat to combine instead of profile defaults')
+    actions.add_argument('--handheld-export', nargs='+', metavar='ENTRY', help='copy selected handheld entries to --dest, without overwriting')
+    actions.add_argument('--catalog-add', nargs=2, metavar=('LABEL', 'LOCATION'),
+                         help='remember a mounted ROM library or configured rclone remote:path')
+    actions.add_argument('--catalog-forget', metavar='SOURCE_ID', help='forget a source without changing its media')
+    actions.add_argument('--catalog-sources', action='store_true', help='list named home/device libraries and last refresh status')
+    actions.add_argument('--catalog-refresh', action='store_true', help='refresh compressed game inventories, retaining offline sources')
+    actions.add_argument('--catalog-list', action='store_true', help='list cached games and their source libraries')
+    actions.add_argument('--catalog-where', metavar='RELATIVE_PATH', help='list locations reporting this compressed path')
+    actions.add_argument('--catalog-pull', nargs=2, metavar=('SOURCE_ID', 'RELATIVE_PATH'),
+                         help='pull an existing compressed game to --dest without conversion')
+    p.add_argument('--dest', type=Path, help='destination directory for extraction, handheld export or catalog pull')
     p.add_argument('--yes', action='store_true', help='confirm permanent backup purge')
     p.add_argument('--keep-originals', action='store_true', help='leave input files in place instead of quarantining')
     p.add_argument('--ingest', metavar='SOURCE', help='read-only mounted library path or rclone remote for --auto')
+    p.add_argument('--scratch', type=Path, metavar='DIR', help='existing temporary workspace outside the library for --auto')
     p.add_argument('--system', action='append', choices=sorted(scanner.SYSTEM_LABELS), help='restrict batch to this system; repeat to combine')
     p.add_argument('--psp-format', choices=('chd', 'cso'), help='output format for PSP ISO files (default: chd)')
     p.add_argument('--preset', choices=('silent', 'balanced', 'docked'), help='CPU profile; defaults to silent on battery')
@@ -70,17 +94,52 @@ def _register_desktop_steam(launcher: Path) -> str:
         return f'Steam shortcut not registered: {exc} The Applications menu launcher is ready. {retry}'
 
 
+def _catalog_action(args):
+    from .catalog import Catalog
+    catalog = Catalog()
+    if args.catalog_add:
+        return asdict(catalog.add(*args.catalog_add))
+    if args.catalog_forget is not None:
+        catalog.remove(args.catalog_forget)
+        return {'forgotten': args.catalog_forget}
+    if args.catalog_refresh:
+        return [asdict(source) for source in catalog.refresh()]
+    if args.catalog_sources:
+        return [asdict(source) for source in catalog.sources()]
+    if args.catalog_pull:
+        return {'paths': list(catalog.pull(*args.catalog_pull, args.dest))}
+    return [asdict(entry) for entry in catalog.entries(args.catalog_where)]
+
+
 def main(argv=None):
     parser = _parser()
     args = parser.parse_args(argv)
-    if args.purge and not args.yes:
-        parser.error('--purge permanently deletes verified originals. Supply --yes to confirm.')
-    if bool(args.extract) != bool(args.dest):
-        parser.error('--extract CHD and --dest DIRECTORY must be used together')
-    if (args.ingest or args.system or args.keep_originals or args.preset or args.psp_format) and not args.auto:
-        parser.error('--ingest, --system, --keep-originals, --preset and --psp-format require --auto')
-    if args.yes and not args.purge:
-        parser.error('--yes is only meaningful with --purge')
+    if (args.purge or args.reclaim_reviewed is not None) != args.yes:
+        parser.error('Permanent cleanup requires --yes; use --yes only with --purge or --reclaim-reviewed.')
+    if bool(args.extract or args.handheld_export or args.catalog_pull) != bool(args.dest):
+        parser.error('Supply --dest only with --extract, --handheld-export or --catalog-pull')
+    if args.plan_gib is not None and args.plan_gib < 0:
+        parser.error('--plan-gib must be zero or greater')
+    if (args.ingest or args.keep_originals or args.scratch) and not args.auto:
+        parser.error('--ingest, --keep-originals and --scratch require --auto')
+    if (args.system or args.psp_format) and not args.auto and args.plan_gib is None:
+        parser.error('--system and --psp-format require --auto or --plan-gib')
+    if args.preset and not (args.auto or args.apply_plan):
+        parser.error('--preset requires --auto or --apply-plan')
+    if (args.handheld_profile or args.handheld_player) and not (args.handheld_list or args.handheld_export):
+        parser.error('Choose --handheld-list or --handheld-export when setting a destination profile or player.')
+    if args.handheld_profiles:
+        from .handheld_profiles import profiles as destinations
+        print(json.dumps(destinations(), ensure_ascii=False, indent=2))
+        return 0
+    if (args.catalog_add or args.catalog_forget is not None or args.catalog_refresh or args.catalog_sources
+            or args.catalog_pull or args.catalog_where is not None or args.catalog_list):
+        try:
+            print(json.dumps(_catalog_action(args), ensure_ascii=False, indent=2, default=str))
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+            print(f'CouchCHD catalog: {exc}', file=sys.stderr)
+            return 1
+        return 0
     if args.register_frontend:
         from .menu_entry import host_home_path, install_desktop, install_script
         frontend, executable = args.register_frontend
@@ -115,7 +174,9 @@ def main(argv=None):
         except (OSError, ValueError, RuntimeError) as exc:
             print(f'CouchCHD menu setup: {exc}', file=sys.stderr)
             return 1
-    if not (args.headless or args.auto or args.undo or args.history or args.purge or args.extract):
+    if not (args.headless or args.auto or args.undo or args.history or args.purge or args.extract
+            or args.health or args.plan_gib is not None or args.apply_plan or args.review or args.mark_tested
+            or args.unmark_tested or args.review_cleanup or args.reclaim_reviewed or args.handheld_list or args.handheld_export):
         try:
             from .ui import launch
         except ImportError as exc:
@@ -129,17 +190,49 @@ def main(argv=None):
     try:
         app = Backend(root)
         code = 0
-        if args.auto:
+        if args.auto or args.apply_plan:
             cancel = threading.Event()
             previous = signal.signal(signal.SIGINT, lambda *_: cancel.set())
             try:
-                result = app.run(systems=set(args.system) if args.system else None, ingest=args.ingest,
-                                 psp_format=args.psp_format or 'chd',
-                                 quarantine=not args.keep_originals, preset=args.preset or profiles.default_preset(),
-                                 progress=lambda message: print(message, file=sys.stderr, flush=True), cancel=cancel)
+                options = dict(preset=args.preset or profiles.default_preset(),
+                               progress=lambda message: print(message, file=sys.stderr, flush=True), cancel=cancel)
+                if args.apply_plan:
+                    preview = json.loads(args.apply_plan.read_text(encoding='utf-8'))
+                    if (not isinstance(preview, dict) or preview.get('root') != str(app.root)
+                            or not isinstance(preview.get('sources'), list)
+                            or not all(isinstance(path, str) for path in preview['sources'])
+                            or not isinstance(preview.get('systems'), list)
+                            or not all(isinstance(s, str) and s in scanner.SYSTEM_LABELS for s in preview['systems'])
+                            or type(preview.get('target_bytes')) is not int or preview['target_bytes'] < 0
+                            or preview.get('psp_format') not in ('chd', 'cso')):
+                        raise ValueError('Not a space plan for this library. Create a new --plan-gib preview.')
+                    result = app.run_plan(preview['systems'], preview['psp_format'], preview['target_bytes'],
+                                          preview['sources'], **options)
+                else:
+                    result = app.run(systems=set(args.system) if args.system else None, ingest=args.ingest,
+                                     psp_format=args.psp_format or 'chd', quarantine=not args.keep_originals,
+                                     scratch_dir=args.scratch, **options)
             finally:
                 signal.signal(signal.SIGINT, previous)
             code = 2 if result['paused'] else int(bool(result['errors']))
+        elif args.health:
+            result = app.health()
+        elif args.plan_gib is not None:
+            result = app.plan(args.system, args.psp_format or 'chd', args.plan_gib * 1024**3)
+        elif args.review:
+            result = app.review()
+        elif args.mark_tested or args.unmark_tested:
+            app.set_play_tested(args.mark_tested or args.unmark_tested, bool(args.mark_tested))
+            result = {'tested': bool(args.mark_tested)}
+        elif args.review_cleanup:
+            result = app.reclaim_preview()
+        elif args.reclaim_reviewed:
+            result = {'purged': app.reclaim_reviewed(args.reclaim_reviewed)}
+        elif args.handheld_list or args.handheld_export:
+            from .handheld_profiles import DEFAULT_PROFILE
+            profile = args.handheld_profile or DEFAULT_PROFILE
+            result = (app.export_entries(profile, players=args.handheld_player) if args.handheld_list else
+                      app.export_handheld(args.handheld_export, args.dest, profile, players=args.handheld_player))
         elif args.history:
             result = app.history()
         elif args.undo:

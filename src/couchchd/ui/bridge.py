@@ -3,22 +3,24 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import datetime
 import hashlib
 from pathlib import Path
 import threading
 
 from PySide6.QtCore import (QAbstractListModel, QModelIndex, QObject, Property, QDir,
-                            QSettings, QStandardPaths, Qt, Signal, Slot)
+                            QSettings, QStandardPaths, QStorageInfo, Qt, Signal, Slot)
 
 from ..app import Backend
 from .. import cloud_ingest, hardware, profiles, scanner, updater
 from ..output_formats import SUFFIX_BY_MODE
 from ..telemetry import ItemProgress
 from . import launcher_art, steam
+from .catalog_controls import CatalogControls
+from .library_tools import LibraryTools
+from .presentation import _when, row, size
 
 PRESETS = {'silent': 'Handheld Silent', 'balanced': 'Balanced', 'docked': 'Docked Max'}
-TITLES = ['Dashboard', 'Systems', 'Multi-disc & M3U', 'Cloud ingest', 'History & backups']
+TITLES = ['Dashboard', 'Systems', 'Multi-disc & M3U', 'NAS / Cloud', 'History & backups']
 PSP_FORMATS = {
     'chd': 'CHD · PPSSPP 1.17 or newer',
     'cso': 'CSO · Also works with older PPSSPP versions',
@@ -36,15 +38,28 @@ def _output_label(system, ext, psp_format):
     return SUFFIX_BY_MODE[mode].lstrip('.').upper()
 
 
-def size(count: int) -> str:
-    for unit in ('B', 'KiB', 'MiB', 'GiB'):
-        if abs(count) < 1024 or unit == 'GiB':
-            return f'{count:,.0f} B' if unit == 'B' else f'{count:,.1f} {unit}'
-        count /= 1024
-
-
-def row(key, label, detail='', value='', arg=''):
-    return {'key': key, 'label': str(label), 'detail': str(detail), 'value': str(value), 'arg': str(arg)}
+def _game_details(game, psp_format, *, expanded=False, workspace=''):
+    path = Path(game['path'])
+    system = game['system']
+    label = scanner.SYSTEM_LABELS[system]
+    output = _output_label(system, path.suffix.lower(), psp_format)
+    if not game.get('archive'):
+        return f"{label} → {output}  ·  {size(game['size'])}"
+    packed = size(game.get('archive_bytes', game['size']))
+    unpacked = size(game.get('expanded_bytes', game['size']))
+    streamed = system == 'psp' and psp_format == 'cso'
+    scratch = size(game.get('staging_bytes', game.get('expanded_bytes', game['size'])))
+    method = 'Streamed · no unpacked ISO' if streamed else f'{scratch} scratch'
+    text = f'ZIP → {output} · {packed} packed / {unpacked} unpacked · {method}'
+    if not expanded:
+        return text
+    details = [label, text, 'Original ZIP always kept.']
+    if not streamed:
+        details.append('Only this archive is unpacked into scratch space while it converts.')
+        details.append(f"Temporary workspace: {workspace or 'Automatic'}. Free space is checked before staging.")
+    if game.get('output_bound') is not None:
+        details.append(f"Allow up to {size(game['output_bound'])} for the staged output, separate from input scratch.")
+    return '\n'.join(details)
 
 
 def _settings():
@@ -66,12 +81,6 @@ def _snapshot(backend):
 def _directories(path: Path):
     folders = sorted((p for p in path.iterdir() if p.is_dir()), key=lambda p: p.name.casefold())
     return path, folders
-
-
-def _when(value):
-    if isinstance(value, (float, int)):
-        return datetime.fromtimestamp(value).astimezone().strftime('%Y-%m-%d %H:%M')
-    return str(value or 'Not recorded')
 
 
 POLICIES = {
@@ -215,6 +224,7 @@ class Bridge(QObject):
         self.psp_manually_toggled = False
         saved_format = self.prefs.value('pspFormat', 'chd', type=str)
         self.psp_format = saved_format if saved_format in PSP_FORMATS else 'chd'
+        self.scratch_dir = self.prefs.value('scratchDir', '', type=str)
         self.pi = self.recalbox = False
         policy = self.prefs.value('cleanupPolicy', 'quarantine', type=str)
         self.policy = policy if policy in POLICIES else 'quarantine'
@@ -244,6 +254,9 @@ class Bridge(QObject):
         self._directory_trail = []
         self._return_to = ''
         self._confirm = None
+        self._confirm_back = None
+        self.tools = LibraryTools(self)
+        self.catalog = CatalogControls(self)
         self._status = 'Opening library…'
         self._busy = ''
         self._primary = 'Choose folder'
@@ -495,9 +508,7 @@ class Bridge(QObject):
                         flag = ('Already verified' if self._completed(g) else
                                 'System off' if g['system'] not in self.enabled_systems else
                                 'Selected' if path in selected else 'Skipped')
-                        system = g['system']
-                        output = _output_label(system, Path(path).suffix.lower(), self.psp_format)
-                        rows.append(row('game', Path(path).name, f"{scanner.SYSTEM_LABELS[system]} → {output}  ·  {size(g['size'])}", flag, path))
+                        rows.append(row('game', Path(path).name, _game_details(g, self.psp_format), flag, path))
                     if not snap['games']:
                         rows.append(row('scan', 'No ready sources', 'Add supported images or cartridge ROMs, then scan again.', 'Rescan'))
                 elif self.filter == 'Output files':
@@ -517,6 +528,12 @@ class Bridge(QObject):
                             rows.append(row('info', Path(issue['path']).name, issue['reason'], '', issue['path']))
                     if len(rows) == 1:
                         rows.append(row('scan', 'No matching issues', 'The last scan did not flag files in this view.', 'Rescan'))
+            rows[0:0] = [
+                row('tool_plan', 'Make room on this card', 'Choose a space goal and preview the batch.', 'Plan'),
+                row('tool_health', 'Library health check', 'Find problems and see what to do next.', 'Check'),
+                row('tool_export', 'Sync to handheld', 'Choose games for your handheld’s firmware and player.', 'Choose'),
+            ]
+            if self.backend is not None:
                 rows.append(row('scan', 'Scan library again', str(self.root)))
         elif self.tab == 1:
             self._subtitle = 'Choose which systems to include in local and cloud batches.'
@@ -538,9 +555,10 @@ class Bridge(QObject):
                 rows.append(row('scan', 'No playlists in this library', 'Convert a complete numbered CHD set for one of the supported systems.', 'Scan'))
         elif self.tab == 3:
             self._summary = f'{len(self.enabled_systems)} systems enabled'
-            self._subtitle = 'Ingest all eligible games in enabled systems. Remote originals stay in place.'
-            primary = 'Start ingest' if self.ingest and self.backend else 'Choose source' if self.backend else 'Choose library'
-            rows = [row('mount', 'Mounted folder', self.ingest or 'Browse a mounted NAS, SMB, NFS, or external drive.', 'Browse'),
+            self._subtitle = 'Pull existing games from a named library, or ingest sources for conversion.'
+            primary = 'Start ingest' if self.ingest and self.backend else 'Open catalog'
+            rows = [row('catalog_open', 'Home & device libraries', 'Browse named sources and pull already-compressed games.', 'Open'),
+                    row('mount', 'Ingest from mounted folder', self.ingest or 'Browse a NAS, SMB, NFS, or external drive.', 'Browse'),
                     row('remotes', 'Configured rclone remotes', 'Lists the remotes already configured on this device.', 'Refresh')]
             if self.remote_names == []:
                 rows.append(row('remotes', 'No remotes found', 'Use a mounted folder or configure rclone, then refresh.'))
@@ -548,10 +566,11 @@ class Bridge(QObject):
                 rows.append(row('remote', name, 'Ingest from this remote', 'Selected' if self.ingest == name else '', name))
             if self.ingest: rows.insert(0, row('runcloud', 'Start cloud ingest', self.ingest, 'Review'))
         else:
-            self._subtitle = 'Restore originals or reclaim the space held by verified backups.'
-            primary = 'Purge backups'
-            rows = [row('undo', 'Undo last batch', 'Restore quarantined originals and reverse the most recent batch.'),
-                    row('purge', 'Purge verified backups', 'Test your games first. Removing backups cannot be undone.', 'Review')]
+            self._subtitle = 'Play-test verified games before reclaiming the space held by their backups.'
+            primary = 'Review backups'
+            rows = [row('tool_review', 'Play-test your games', 'Mark each verified disc after trying it in your emulator.', 'Open'),
+                    row('tool_reclaim', 'Review tested backups', 'See the files, their sizes and which batches will lose Undo.', 'Review'),
+                    row('undo', 'Undo last batch', 'Restore quarantined originals and reverse the most recent batch.')]
             for record in self.history:
                 rows.append(row('history', f"Batch {record['id']}", f"{_when(record['started'])}  ·  {record['operations']} operations", record['status'], record['id']))
         if self._queue_result and self.tab == (3 if self._queue_cloud else 0):
@@ -570,6 +589,7 @@ class Bridge(QObject):
         self._modal = None
         self._dialog_rows = []
         self._confirm = None
+        self._confirm_back = None
         self.changed.emit()
         self.sceneChanged.emit(False)
 
@@ -577,8 +597,9 @@ class Bridge(QObject):
         self._show('notice', title, message, [row('back', 'Return')] + [row('note', line) for line in lines])
         if alert: self.cue('alert')
 
-    def _ask(self, title, message, label, callback):
+    def _ask(self, title, message, label, callback, *, return_to=None):
         self._confirm = callback
+        self._confirm_back = return_to
         self._show('confirm', title, message, [row('back', 'Go back', 'No changes will be made.'), row('accept', label)])
 
     @Slot(int)
@@ -586,7 +607,6 @@ class Bridge(QObject):
         if self._modal or self._busy or self._queue_visible: return
         self.tab = index % len(TITLES)
         self._draw(True)
-        if self.tab == 3 and self.remote_names is None: self._remotes()
 
     def _remotes(self):
         def loaded(names):
@@ -608,6 +628,7 @@ class Bridge(QObject):
             row('library', 'ROM library', self.location, 'Change'), row('presets', 'Thermal profile', PRESETS[self.preset], 'Choose'),
             row('psp_formats', 'PSP output format', 'For PSP ISO files only.', self.psp_format.upper()),
             row('policy', 'After verification', POLICIES[self.policy][1], POLICIES[self.policy][0]),
+            row('scratch_settings', 'Temporary workspace', self.scratch_dir or 'Automatic · optional for archive staging.', 'Choose'),
             row('sound', 'Interface sounds', 'Quiet navigation ticks and batch feedback.', 'On' if self.sound else 'Off'),
             row('rumble', 'Controller vibration', 'Pulse on completion or when attention is needed.', 'On' if self.rumble else 'Off'),
             row('update', 'Update CouchCHD', 'Check the public release and install it for your next launch.'),
@@ -615,13 +636,43 @@ class Bridge(QObject):
               if launcher_art.managed_launcher() else []),
             row('steam', 'Add to Steam', 'Register the launcher, grid artwork, and gamepad layout.'), row('exit', 'Exit CouchCHD')], reset=reset)
 
+    def _scratch_settings(self):
+        self._show('scratch_settings', 'Temporary workspace',
+                   'Optional: put temporary conversion files on another mounted drive. This does not move your library or change where games are saved.', [
+                       row('scratch_auto', 'Use automatic workspace', 'Let CouchCHD choose staging space.', 'Current' if not self.scratch_dir else ''),
+                       row('scratch_browse', 'Choose existing folder', self.scratch_dir or 'Choose a folder outside the ROM library.', 'Browse')])
+
+    def _set_scratch(self, path):
+        self.scratch_dir = str(path)
+        self.prefs.setValue('scratchDir', self.scratch_dir)
+        self._settings()
+
     def _pick(self, target, *, returning=False):
         self._target = target
         self._directory_trail.clear()
         if not returning:
             self._return_to = 'settings' if self._modal and self._modal['kind'] == 'settings' else ''
-        paths = list(dict.fromkeys([*self.candidates, *([self.root] if self.root else []), Path.home(), *(Path(d.absoluteFilePath()) for d in QDir.drives())]))
-        self._show('locations', {'library': 'Choose ROM library', 'mount': 'Choose ingest source', 'extract': 'Choose extraction folder'}[target], 'Open a location, then select the folder you want to use.', [row('browse', p.name or str(p), p, 'Open', p) for p in paths])
+        titles = {
+            'library': 'Choose ROM library', 'mount': 'Choose ingest source', 'extract': 'Choose extraction folder',
+            'health_source': 'Choose source to check', 'export_source': 'Choose games source',
+            'export_dest': 'Choose export folder', 'catalog-mounted': 'Choose mounted library',
+            'scratch': 'Choose temporary workspace',
+        }
+        def show_locations(mounts):
+            paths = list(dict.fromkeys([*mounts, *self.candidates, *([self.root] if self.root else []),
+                                        Path.home(), *(Path(d.absoluteFilePath()) for d in QDir.drives())]))
+            body = (self.tools.folder_hint if target == 'export_dest' else
+                    'Open a location, then select the folder you want to use.')
+            rows = [row('browse', p.name or str(p), p, 'Open', p) for p in paths]
+            if target == 'export_dest' and (folder := self.tools.previous_folder):
+                rows.insert(0, row('tool_last_folder', 'Review last destination', folder, 'Review'))
+            self._show('locations', titles[target], body, rows)
+        if target in ('export_dest', 'export_source', 'health_source', 'catalog-mounted', 'scratch'):
+            def volumes():
+                return [Path(v.rootPath()) for v in QStorageInfo.mountedVolumes()
+                        if v.isValid() and v.isReady() and not v.isRoot()]
+            return self._work('Finding mounted folders', volumes, show_locations)
+        show_locations([])
 
     def _browse(self, path, *, remember=True):
         def loaded(data):
@@ -638,6 +689,19 @@ class Bridge(QObject):
     def _choose_dir(self):
         path = self._dir
         if self._target == 'library': return self._library(path)
+        if self._target == 'scratch':
+            def validate():
+                folder = path.resolve(strict=True)
+                if not folder.is_dir() or (self.root is not None and folder.is_relative_to(self.root.resolve())):
+                    raise ValueError('Choose an existing temporary workspace outside the working ROM library.')
+                return folder
+            return self._work('Checking workspace', validate, self._set_scratch)
+        if self._target == 'catalog-mounted':
+            return self.catalog.chosen_directory(path)
+        if self._target == 'export_dest':
+            return self.tools.export_to(path)
+        if self._target in ('health_source', 'export_source'):
+            return self.tools.open_source(self._target.split('_')[0], path)
         if self._target == 'mount':
             self.ingest = str(path)
             self._hide()
@@ -667,23 +731,42 @@ class Bridge(QObject):
             details = f'{scope} in enabled systems: {len(sources)}.\n{self.root}\n{POLICIES[self.policy][1]}'
             if self.policy != 'keep' and any(g['system'] in ('xbox', '3ds') and g['path'] in sources for g in self.snap['games']):
                 details += ' Original Xbox and 3DS images always stay in place.'
+            archives = [g for g in self.snap['games'] if g.get('archive') and str(g['path']) in sources]
+            if archives:
+                details += f'\n{len(archives)} ZIP sources. Original ZIPs always stay in place.'
+                if any(g['system'] != 'psp' or self.psp_format != 'cso' for g in archives):
+                    details += ' Archives needing scratch are staged one at a time.'
+                if self.psp_format == 'cso' and any(g['system'] == 'psp' for g in archives):
+                    details += ' PSP → CSO streams without unpacking an ISO to disk.'
         if self.recalbox: details += '\nStop EmulationStation first. Its cached gamelist can overwrite playlist metadata.'
         self._ask('Start cloud ingest?' if cloud else 'Start verified compression?', details, 'Start ingest' if cloud else 'Start batch', lambda: self._run(cloud, sources))
 
-    def _run(self, cloud, sources):
+    def _run(self, cloud, sources, *, plan=None):
         self._hide()
         self._cancel = threading.Event()
         self._cancel_requested = False
         self._queue_cloud = cloud
         self._queue_result = ''
-        self._queue.reset(ItemProgress(str(g['path']), Path(g['path']).name, g['system'], 'queued')
-                          for g in (self.snap or {}).get('games', ()) if not cloud and str(g['path']) in sources)
+        if plan is not None:
+            games = self.tools.plan['items']
+        else:
+            games = (g for g in (self.snap or {}).get('games', ()) if not cloud and str(g['path']) in sources)
+        self._queue.reset(ItemProgress(str(g['path']), Path(g['path']).name, g['system'], 'queued') for g in games)
         self._queue_visible = True
         self.queueChanged.emit()
-        options = dict(systems=set(self.enabled_systems), sources=sources, ingest=self.ingest if cloud else None,
-                       preset=self.preset, psp_format=self.psp_format, quarantine=cloud or self.policy != 'keep',
-                       immediate=not cloud and self.policy == 'immediate', progress=self._progress.emit,
-                       on_item=self._item.emit, on_space=self._space.emit, cancel=self._cancel)
+        options = dict(sources=sources, preset=self.preset, psp_format=self.psp_format,
+                       progress=self._progress.emit, on_item=self._item.emit, on_space=self._space.emit,
+                       cancel=self._cancel)
+        if plan is not None:
+            run = self.backend.run_plan
+            systems, target = plan
+            options.update(systems=systems, target_bytes=target)
+        else:
+            run = self.backend.run
+            options.update(systems=set(self.enabled_systems), ingest=self.ingest if cloud else None,
+                           quarantine=cloud or self.policy != 'keep', immediate=not cloud and self.policy == 'immediate')
+            if self.scratch_dir:
+                options['scratch_dir'] = self.scratch_dir
         def finished(result):
             self.saved = int(result['saved'])
             self.prefs.setValue(self._saved_key(), str(self.saved))
@@ -697,8 +780,8 @@ class Bridge(QObject):
                                        paused or ('Cancelled before completion.' if cancelled else 'Not processed in this batch.'))
             self.queueChanged.emit()
             text = f'{len(converted)} converted. Compression difference: {size(self.saved)}.'
-            if converted and not cloud and self.policy == 'quarantine':
-                text += '\nTest your games before permanently removing backups in History.'
+            if converted and not cloud and (plan is not None or self.policy == 'quarantine'):
+                text += '\nBackups still occupy space. Play-test verified games, then review backups in History.'
             if paused:
                 text += f'\n{paused}'
                 if not cancelled: text += '\nResolve the condition, then start another batch to continue.'
@@ -708,47 +791,49 @@ class Bridge(QObject):
                 self._report(result_text)
                 lines = errors + list(result.get('messages', ()))
                 if warning: lines.append(warning)
-                self._notice(title, result_text, lines)
+                self._show('notice', title, result_text, [
+                    row('back', 'Return to queue'),
+                    *([row('tool_review', 'Play-test your games', 'Review verified outputs and play-test marks.')] if converted else []),
+                    *(row('note', line) for line in lines)])
                 self.cue('alert' if errors or paused or warning else 'done')
             self._refresh_after_commit(refreshed)
-        self._work('Compressing discs', lambda: self.backend.run(**options), finished)
+        self._work('Compressing discs', lambda: run(**options), finished)
 
     def _with_free_space(self, message, before):
         if self.snap is None or before is None:
             return message
         after = self.snap['free']
         delta = after - before
-        direction = 'more' if delta >= 0 else 'less'
-        return f'{message}\nLibrary free now: {size(after)} ({size(abs(delta))} {direction} than before).'
+        change = 'unchanged' if delta == 0 else f"{size(abs(delta))} {'more' if delta > 0 else 'less'} than before"
+        return f'{message}\nLibrary free now: {size(after)} ({change}).'
 
-    def _management(self, key):
+    def _undo(self):
         if self.backend is None: return self._pick('library')
-        undo = key == 'undo'
-        text = ('Restore the most recent batch from its backup and reverse its playlist changes.' if undo else
-                'Test your converted games first. Removing verified backups frees the space they use, '
-                'but you cannot Undo after permanent removal.')
-        if undo and self.recalbox: text += ' Stop EmulationStation first to protect gamelist changes.'
+        text = 'Restore the most recent batch from its backup and reverse its playlist changes.'
+        if self.recalbox: text += ' Stop EmulationStation first to protect gamelist changes.'
         def execute():
             self._hide()
             def change():
                 before = hardware.free_bytes(self.root)
-                return (self.backend.undo() if undo else self.backend.purge()), before
+                return self.backend.undo(), before
             def done(result):
                 count, before = result
-                msg = f'{count} operations reversed.' if undo else f'{count} backups purged.'
+                msg = f'{count} operations reversed.'
                 def refreshed(warning):
                     result_text = self._with_free_space(msg, before)
                     self._report(result_text)
-                    self._notice('Undo complete' if undo else 'Purge complete', result_text, [warning] if warning else [])
+                    self._notice('Undo complete', result_text, [warning] if warning else [])
                 self._refresh_after_commit(refreshed)
-            self._work('Restoring originals' if undo else 'Purging verified backups', change, done)
-        self._ask('Undo last batch?' if undo else 'Purge verified backups?', text, 'Restore originals' if undo else 'Permanently purge backups', execute)
+            self._work('Restoring originals', change, done)
+        self._ask('Undo last batch?', text, 'Restore originals', execute)
 
     @Slot()
     def primary(self):
         if self._modal or self._busy or self._queue_visible: return
-        if self.tab == 4: self._management('purge')
-        elif self.tab == 3: self._run_prompt(True)
+        if self.tab == 4: self.tools.activate('tool_reclaim', '')
+        elif self.tab == 3:
+            if self.ingest and self.backend: self._run_prompt(True)
+            else: self.catalog.activate('catalog_open', '')
         elif self._selected(): self._run_prompt()
         else: self._scan()
 
@@ -765,13 +850,25 @@ class Bridge(QObject):
                 self._report('Cancelling safely. Waiting for active operations…')
             if not self._cancel.is_set(): self._ask('Cancel this batch?', 'Completed conversions remain in History. Incomplete discs will not be committed.', 'Cancel batch', cancel)
             return
-        if kind == 'confirm': return self._hide()
+        if kind == 'confirm':
+            return_to = self._confirm_back
+            self._hide()
+            if return_to: return_to()
+            return
         if self._busy: return
         if kind in ('presets', 'policies', 'psp_formats'): return self._settings()
         if kind == 'browse':
             if self._directory_trail: return self._browse(self._directory_trail.pop(), remember=False)
             return self._pick(self._target, returning=True)
         if kind == 'locations' and self._return_to == 'settings': return self._settings()
+        if kind == 'locations':
+            if self._target == 'scratch': return self._scratch_settings()
+            if self._target in ('health_source', 'export_source'):
+                return self.tools.activate('tool_' + self._target.split('_')[0], '')
+            if self._target == 'export_dest': return self.tools.show_pack()
+            if self._target == 'catalog-mounted' and self.catalog.back(kind): return
+        if kind == 'scratch_settings': return self._settings()
+        if self.tools.back(kind) or (kind.startswith('catalog_') and self.catalog.back(kind)): return
         if kind: return self._hide()
         if self._queue_visible:
             self._queue_visible = False
@@ -821,7 +918,8 @@ class Bridge(QObject):
         if key == 'game':
             game = next(g for g in self.snap['games'] if str(g['path']) == arg)
             if inspect:
-                return self._notice(Path(arg).name, f"{game['system']}  ·  {size(game['size'])}\n{arg}", [str(t) for t in game['tracks']])
+                details = _game_details(game, self.psp_format, expanded=True, workspace=self.scratch_dir)
+                return self._notice(Path(arg).name, f"{details}\n{arg}", [str(t) for t in game['tracks']])
             if self._completed(game):
                 return self._notice('Already verified', 'This output already exists. Choose Output files in the library view to inspect it.')
             if game['system'] not in self.enabled_systems:
@@ -829,9 +927,18 @@ class Bridge(QObject):
             if arg in self.omitted: self.omitted.remove(arg)
             else: self.omitted.add(arg)
             return self._draw(False)
-        if key == 'chd':
-            self._extract_chd = Path(arg)
-            return self._show('chd', Path(arg).name, f"{item['detail']}\n{arg}", [row('extract', 'Extract CD to BIN/CUE', 'For CD or GD-ROM CHDs only.'), row('back', 'Return')])
+        if key.startswith('tool_'):
+            return self.tools.activate(key, arg)
+        if key.startswith('catalog_'):
+            return self.catalog.activate(key, arg)
+        if key in ('chd', 'info') and self.filter == 'Output files' and not self._modal:
+            actions = []
+            if arg in self.snap['verified']:
+                actions.append(row('tool_review', 'Play-test status', 'Review or change your mark for this file.', 'Open', arg))
+            if key == 'chd':
+                self._extract_chd = Path(arg)
+                actions.append(row('extract', 'Extract CD to BIN/CUE', 'For CD or GD-ROM CHDs only.'))
+            return self._show('output', Path(arg).name, f"{item['detail']}\n{arg}", [*actions, row('back', 'Return')])
         if key == 'extract': return self._pick('extract')
         if key == 'playlist':
             def playlist_lines():
@@ -856,6 +963,9 @@ class Bridge(QObject):
             if arg == 'psp':
                 self.psp_manually_toggled = True
             return self._draw(False)
+        if key == 'scratch_settings': return self._scratch_settings()
+        if key == 'scratch_browse': return self._pick('scratch')
+        if key == 'scratch_auto': return self._set_scratch('')
         if key == 'psp_formats':
             return self._show('psp_formats', 'PSP output format', 'Choose how PSP ISO files will be saved. Existing outputs are not changed.', [
                 row('psp_format', label, '', 'Current' if self.psp_format == value else '', value)
@@ -907,7 +1017,7 @@ class Bridge(QObject):
             self.ingest = arg
             return self._draw(False)
         if key == 'runcloud': return self._run_prompt(True)
-        if key in ('undo', 'purge'): return self._management(key)
+        if key == 'undo': return self._undo()
 
     def _policy(self, value):
         self.policy = value

@@ -32,3 +32,50 @@ for game in psp/Probe.cso 3ds/Probe.trim.cci gc/Probe.rvz wii/Probe.rvz xbox/Pro
 done
 # Use a separate reader, not the single-member 7z writer's own verifier.
 bsdtar -xOf "$library/nes/Probe.7z" Probe.nes | cmp - "$library/nes/Probe.nes"
+
+# Exercise discovery, guarded cleanup and cross-library reuse through the
+# shipped entry point, not Python imports from the checkout.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+export XDG_DATA_HOME="$work/state"
+mkdir -p "$work/working/psp" "$work/card" "$work/pulled"
+cp -p "$library/psp/Probe.iso" "$work/working/psp/Game.iso"
+roms=$work/working
+"$@" --root "$roms" --health
+"$@" --root "$roms" --system psp --psp-format cso --plan-gib 1 > "$work/plan.json"
+"$@" --root "$roms" --apply-plan "$work/plan.json" --preset silent
+"$@" --root "$roms" --review > "$work/review.json"
+id=$("$python" -c 'import json,sys; print(next(r["id"] for r in json.load(open(sys.argv[1])) if r["path"].endswith("/Game.cso") and not r["tested"]))' "$work/review.json")
+"$@" --root "$roms" --mark-tested "$id"
+"$@" --root "$roms" --review-cleanup > "$work/reclaim.json"
+token=$("$python" -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["count"] == 1; print(p["token"])' "$work/reclaim.json")
+"$@" --root "$roms" --reclaim-reviewed "$token" --yes
+"$@" --handheld-profiles > "$work/profiles.json"
+"$python" -c 'import json,sys; assert {"rg405m","arkos","muos"} <= {p["id"] for p in json.load(open(sys.argv[1]))}' "$work/profiles.json"
+"$@" --root "$roms" --handheld-list --handheld-profile android-t618 --handheld-player ppsspp > "$work/eligible.json"
+"$python" -c 'import json,sys; assert [r["path"] for r in json.load(open(sys.argv[1]))] == ["psp/Game.cso"]' "$work/eligible.json"
+"$@" --root "$roms" --handheld-export psp/Game.cso --dest "$work/card"
+cmp "$roms/psp/Game.cso" "$work/card/psp/Game.cso"
+"$@" --catalog-add 'Handheld SD' "$work/card" > "$work/source.json"
+source_id=$("$python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$work/source.json")
+"$@" --catalog-refresh
+"$@" --catalog-pull "$source_id" psp/Game.cso --dest "$work/pulled"
+cmp "$roms/psp/Game.cso" "$work/pulled/psp/Game.cso"
+
+# The NTFS-like master is an ingest source, never a scratch directory. Process
+# loose + zipped ISOs together and produce a CSO identical to loose conversion.
+mkdir -p "$work/master/psp" "$work/zip-results"
+cp -p "$library/psp/Probe.iso" "$work/master/psp/Loose.iso"
+"$python" - "$work/master/psp" <<'PY'
+from pathlib import Path
+import os, sys, zipfile
+folder = Path(sys.argv[1])
+archive = folder / 'Packed.zip'
+with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as files:
+    files.write(folder / 'Loose.iso', 'Dump/Original.iso')
+stamp = (folder / 'Loose.iso').stat().st_mtime
+os.utime(archive, (stamp, stamp))
+PY
+"$@" --root "$work/zip-results" --auto --ingest "$work/master" --system psp --psp-format cso --preset silent
+cmp "$work/zip-results/psp/Loose.cso" "$work/zip-results/psp/Packed.cso"
+test -s "$work/master/psp/Packed.zip" && test -s "$work/master/psp/Loose.iso"

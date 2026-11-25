@@ -51,6 +51,30 @@ def _artifacts(root):
     return sorted(chds), sorted(playlists)
 
 
+def _scan_game(root, game, known):
+    job = Job(game, game.source, True)
+    row = dict(path=str(game.source), system=game.system, size=game.size, mode=game.mode,
+               output_bound=job.output_bound(), sheet_bytes=game.size if game.sheet else 0,
+               tracks=[str(p) for p in game.files if p != game.source],
+               verified_modes=[scanner.output_mode(game, fmt)
+                               for fmt in (('chd', 'cso') if game.system == 'psp' else ('chd',))
+                               if known and _already_published(_disc_output(root, game, fmt), known)])
+    if game.archive:
+        row.update(archive=True, archive_bytes=game.stamps[0][2], expanded_bytes=game.size,
+                   staging_bytes=job.archive_staging_bytes)
+    return row
+
+
+def _scan_rows(root, games, issues, known):
+    chds, playlists = _artifacts(root)
+    return {
+        'games': [_scan_game(root, game, known) for game in games],
+        'issues': [{'path': str(i.path), 'category': i.category, 'reason': i.reason} for i in issues],
+        'chds': chds, 'playlists': playlists, 'verified': sorted(map(str, known)),
+        'free': hardware.free_bytes(root),
+    }
+
+
 class Backend:
     def __init__(self, root: Path):
         self.root = Path(root).expanduser().resolve(strict=True)
@@ -72,39 +96,85 @@ class Backend:
     def scan(self):
         with self._session() as db:
             games, issues = scanner.scan(self.root)
-            chds, playlists = _artifacts(self.root)
-            known = set(db.verified())
-            return {
-                'games': [{'path': str(g.source), 'system': g.system, 'size': g.size, 'mode': g.mode,
-                           'verified_modes': [scanner.output_mode(g, fmt)
-                                              for fmt in (('chd', 'cso') if g.system == 'psp' else ('chd',))
-                                              if known and _already_published(_disc_output(self.root, g, fmt), known)],
-                           'tracks': [str(p) for p in g.files if p != g.source]} for g in games],
-                'issues': [{'path': str(i.path), 'category': i.category, 'reason': i.reason} for i in issues],
-                'chds': chds, 'playlists': playlists, 'verified': sorted(map(str, known)),
-                'free': hardware.free_bytes(self.root),
-            }
+            return _scan_rows(self.root, games, issues, set(db.verified()))
+
+    def health(self):
+        # Diagnostics on a read-only master must not create an SQLite file/lock
+        # or replay pending rename operations as a side effect of inspection.
+        from .library_tools import health
+        games, issues = scanner.scan(self.root)
+        return health(self.root, _scan_rows(self.root, games, issues, set()))
+
+    def plan(self, systems, psp_format, target_bytes):
+        from .library_tools import plan
+        scope = sorted(scanner.SYSTEM_LABELS if systems is None else systems)
+        result = plan(self.root, self.scan(), scope, psp_format, target_bytes)
+        return dict(result, root=str(self.root), systems=scope, psp_format=psp_format)
+
+    def run_plan(self, systems, psp_format, target_bytes, sources, *, preset='balanced',
+                 progress=None, cancel=None, on_item=None, on_space=None):
+        if not sources:
+            raise ValueError('No games fit this plan. Review the space estimate again.')
+        return self.run(systems=systems, sources=tuple(sources), psp_format=psp_format, preset=preset,
+                        plan_target=target_bytes, progress=progress, cancel=cancel,
+                        on_item=on_item, on_space=on_space)
+
+    def export_entries(self, profile=None, *, players=None):
+        from .handheld import entries
+        return entries(self.root, profile, players=players)
+
+    def export_handheld(self, selected, dest, profile=None, *, players=None, expected_destination=None):
+        from .handheld import export
+        return export(self.root, selected, Path(dest), profile, players=players, expected_destination=expected_destination)
+
+    def review(self):
+        from .review import review
+        with self._session() as db:
+            return review(db)
+
+    def set_play_tested(self, id, tested):
+        from .review import set_play_tested
+        with self._session() as db:
+            return set_play_tested(db, id, tested)
+
+    def reclaim_preview(self):
+        from .review import reclaim_preview
+        with self._session() as db:
+            return reclaim_preview(db)
+
+    def reclaim_reviewed(self, token):
+        from .review import reclaim_reviewed
+        with self._session() as db:
+            return reclaim_reviewed(db, token)
 
     def run(self, *, systems=None, sources=None, ingest=None, preset='balanced', psp_format='chd', quarantine=True,
             immediate=False, progress=None, cancel=None, on_item: Callable[[ItemProgress], None] | None = None,
-            on_space: Callable[[int], None] | None = None):
+            on_space: Callable[[int], None] | None = None, plan_target=None, scratch_dir=None):
         report = progress or (lambda _: None)
         cancel = threading.Event() if cancel is None else cancel
         if psp_format not in ('chd', 'cso'):
             raise ValueError('PSP output must be chd or cso.')
+        if plan_target is not None and (ingest or immediate or not quarantine):
+            raise ValueError('Space plans require local, reversible quarantine jobs.')
         if immediate and (not quarantine or ingest):
             raise ValueError('Immediate cleanup is only available for local, verified quarantine jobs.')
         if systems is None:
-            systems = profiles.default_systems(psp_format)
+            systems = set(scanner.SYSTEM_LABELS) if plan_target is not None else profiles.default_systems(psp_format)
         if ingest and (root_system := scanner.SYSTEMS.get(self.root.name.casefold())):
             systems = set(systems).intersection({root_system})
             if not systems:
                 raise ValueError(f'This destination accepts only {root_system} inputs.')
+        scratch_base = Path(scratch_dir).expanduser().resolve(strict=True) if scratch_dir else None
+        if scratch_base is not None and (not scratch_base.is_dir() or scratch_base.is_relative_to(self.root)):
+            raise ValueError('Choose an existing temporary workspace outside the working ROM library.')
         if ingest and Path(ingest).is_dir():
             origin = Path(ingest).resolve()
             if origin.is_relative_to(self.root) or self.root.is_relative_to(origin):
                 raise ValueError('Ingest source and destination must be separate libraries.')
-        with self._session() as db, hardware.Watchdog() as guard, tempfile.TemporaryDirectory(prefix='couchchd_ingest-') as tmp:
+            if scratch_base is not None and scratch_base.is_relative_to(origin):
+                raise ValueError('Choose a temporary workspace outside the read-only ingest source.')
+        with self._session() as db, hardware.Watchdog() as guard, tempfile.TemporaryDirectory(
+                prefix='.couchchd-work-', dir=scratch_base) as tmp:
             volume = self.root.stat()
             free_before = hardware.free_bytes(self.root)
             if on_space is not None:
@@ -117,6 +187,14 @@ class Backend:
                 destinations = {g.source: _disc_output(self.root, g, psp_format) for g in games}
                 collisions = Counter(str(p).casefold() for p in destinations.values())
                 known = set(db.verified())
+                if plan_target is not None:
+                    from .library_tools import plan
+                    current = plan(self.root, _scan_rows(self.root, games, issues, known),
+                                   systems, psp_format, plan_target)
+                    if list(sources or ()) != current['sources']:
+                        raise ValueError('Available space or titles changed. Preview the plan again.')
+                    indexed = {str(g.source): g for g in games}
+                    games = [indexed[path] for path in current['sources']]
                 missing = None if sources is None else set(map(str, sources))
                 for game in games:
                     if missing is not None:
@@ -185,7 +263,10 @@ class Backend:
             messages = []
             try:
                 if ingest:
-                    with closing(cloud_ingest.games(ingest, scratch, systems, cancel, on_item)) as stream:
+                    def explain(message):
+                        messages.append(message)
+                        report(message)
+                    with closing(cloud_ingest.games(ingest, scratch, systems, cancel, on_item, explain)) as stream:
                         while not worker.paused:
                             reason = guard.pause_reason()
                             if cancel.is_set():
@@ -222,8 +303,9 @@ class Backend:
                 else:
                     worker.process(jobs)
                 if worker.outputs and not worker.paused:
-                    messages = multidisc.organize(self.root, batch, db, worker.outputs)
-                    for message in messages:
+                    organized_messages = multidisc.organize(self.root, batch, db, worker.outputs)
+                    messages.extend(organized_messages)
+                    for message in organized_messages:
                         report(message)
             except (OSError, ValueError, RuntimeError) as exc:
                 worker._error(exc, 'Batch')

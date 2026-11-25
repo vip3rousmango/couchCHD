@@ -21,10 +21,19 @@ import unicodedata
 from collections.abc import Callable, Iterable
 
 from .output_formats import can_replace_source, is_output
+from .scanner import _descriptors
 
 
 class SafetyError(ValueError):
     """Filesystem state doesn't match the journal; leave both copies alone."""
+
+
+def _track_names(sheet: Path) -> set[str]:
+    """All safe filename interpretations; empty means ownership is unknown."""
+    try:
+        return {t.path.as_posix() for tracks, _ in _descriptors(sheet) for t in tracks}
+    except (OSError, ValueError):
+        return set()
 
 
 def _signature(st: os.stat_result) -> tuple[int, ...]:
@@ -69,17 +78,26 @@ def _sync(directory: Path) -> None:
             os.close(fd)
 
 
-def install_new(src: Path, dst: Path) -> None:
-    """Atomic rename without replacement (also works on Linux FAT/exFAT)."""
+def install_new(src: Path, dst: Path, *, src_fd: int | None = None, dst_fd: int | None = None) -> None:
+    """Atomic rename without replacement, optionally between two pinned directories."""
+    if (src_fd is None) != (dst_fd is None):
+        raise ValueError('Provide both source and destination directory descriptors.')
+    if src_fd is not None and any(p.parts != (p.name,) or p.name in {'', '.', '..'} for p in (src, dst)):
+        raise ValueError('Descriptor-relative publication needs single filenames.')
     if os.name == 'nt':
+        if src_fd is not None:
+            raise NotImplementedError('Directory-relative publication needs POSIX file descriptors.')
         os.rename(src, dst)  # Windows refuses an occupied destination.
     else:
         missing = {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP}
         libc = ctypes.CDLL(None, use_errno=True)
-        if sys.platform == 'darwin' and hasattr(libc, 'renamex_np'):
-            rc = libc.renamex_np(os.fsencode(src), os.fsencode(dst), 4)  # RENAME_EXCL
+        if sys.platform == 'darwin' and src_fd is not None and hasattr(libc, 'renameatx_np'):
+            rc = libc.renameatx_np(src_fd, os.fsencode(src), dst_fd, os.fsencode(dst), 4)  # RENAME_EXCL
+        elif sys.platform == 'darwin' and src_fd is None and hasattr(libc, 'renamex_np'):
+            rc = libc.renamex_np(os.fsencode(src), os.fsencode(dst), 4)
         elif sys.platform.startswith('linux') and hasattr(libc, 'renameat2'):
-            rc = libc.renameat2(-100, os.fsencode(src), -100, os.fsencode(dst), 1)
+            rc = libc.renameat2(-100 if src_fd is None else src_fd, os.fsencode(src),
+                                -100 if dst_fd is None else dst_fd, os.fsencode(dst), 1)
         else:
             rc = None
         if rc is not None and rc != 0 and ctypes.get_errno() not in missing:
@@ -87,14 +105,23 @@ def install_new(src: Path, dst: Path) -> None:
             raise OSError(code, os.strerror(code), str(dst))
         if rc != 0:
             # POSIX fallback; do not emulate no-replace using exists()+replace().
-            os.link(src, dst, follow_symlinks=False)
-            _sync(dst.parent)
-            if not os.path.samestat(src.lstat(), dst.lstat()):
+            os.link(src, dst, src_dir_fd=src_fd, dst_dir_fd=dst_fd, follow_symlinks=False)
+            if dst_fd is None:
+                _sync(dst.parent)
+            else:
+                os.fsync(dst_fd)
+            if not os.path.samestat(os.stat(src, dir_fd=src_fd, follow_symlinks=False),
+                                    os.stat(dst, dir_fd=dst_fd, follow_symlinks=False)):
                 raise SafetyError(f"Linked file changed during move: {src}")
-            src.unlink()
-    _sync(dst.parent)
-    if src.parent != dst.parent:
-        _sync(src.parent)
+            os.unlink(src, dir_fd=src_fd)
+    if src_fd is not None:
+        os.fsync(dst_fd)
+        if src_fd != dst_fd:
+            os.fsync(src_fd)
+    else:
+        _sync(dst.parent)
+        if src.parent != dst.parent:
+            _sync(src.parent)
 
 
 _SCHEMA = '''
@@ -113,6 +140,12 @@ CREATE INDEX IF NOT EXISTS ops_destination ON ops(dst,id);
 CREATE TABLE IF NOT EXISTS proofs (
  backup INTEGER NOT NULL REFERENCES ops(id), output INTEGER NOT NULL REFERENCES ops(id),
  PRIMARY KEY(backup,output)
+);
+CREATE TABLE IF NOT EXISTS play_tests (
+ output INTEGER PRIMARY KEY REFERENCES ops(id)
+);
+CREATE TABLE IF NOT EXISTS retired_sheets (
+ backup INTEGER PRIMARY KEY REFERENCES ops(id), tracks TEXT NOT NULL
 );
 '''
 
@@ -140,6 +173,7 @@ class Ledger:
                 AND id IN (SELECT batch FROM ops WHERE state IN ('purging','purged'))
                 AND id NOT IN (SELECT batch FROM ops WHERE state='intent')""")
             self.db.execute("UPDATE batches SET status='interrupted' WHERE status='open'")
+            self._finish_reclaim()
         except BaseException:
             self.db.close()
             raise
@@ -434,9 +468,35 @@ class Ledger:
                 continue
         return found
 
+    def _finish_reclaim(self) -> None:
+        """Reflect an irreversible scoped unlink even after an interrupted cleanup."""
+        # The unlink can reach disk before the last database write. Only mark
+        # it complete if the backup's original filesystem is still mounted.
+        for row in self.db.execute("SELECT id,dst,dstmark FROM ops WHERE kind='quarantine' AND state='purging'"):
+            try:
+                path = self._path(row['dst'])
+                if path.parent.stat().st_dev != json.loads(row['dstmark'])[0]:
+                    continue
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    _sync(path.parent)
+                    self.db.execute("UPDATE ops SET state='purged' WHERE id=?", (row['id'],))
+            except (OSError, SafetyError):
+                continue
+        self.db.execute("""UPDATE batches SET status=CASE WHEN EXISTS (
+                SELECT 1 FROM ops WHERE batch=batches.id AND kind='quarantine'
+                AND state IN ('done','purging')) THEN 'partial_purge' ELSE 'purged' END
+            WHERE status IN ('finished','partial_purge') AND EXISTS (
+                SELECT 1 FROM ops WHERE batch=batches.id AND state IN ('purging','purged'))""")
+
     def _purge_plan(self, rows):
         """Authenticate every requested backup and proof before the first unlink."""
-        live = {key: (name, mark) for name, (key, mark, _) in self._publications().items()}
+        replaceable = {row['id'] for row in self.db.execute(
+            "SELECT id,dst FROM ops WHERE kind='publish' AND state='done'")
+            if can_replace_source(Path(row['dst']))}
+        live = {key: (name, mark, ctime) for name, (key, mark, ctime) in self._publications().items()
+                if key in replaceable and can_replace_source(Path(name))}
         # Cache large output hashes shared by several quarantined tracks.
         authenticated = {}
         backups = []
@@ -446,17 +506,23 @@ class Ledger:
                 raise SafetyError('No live verified output for this backup')
             for key in keys:
                 if key not in authenticated:
-                    name, mark = live[key]
-                    path = self._path(name)
+                    name, mark, ctime = live[key]
+                    path = self._library(Path(name))
                     sig = _signature(path.lstat())
+                    if sig[-1] != ctime:
+                        raise SafetyError(f'Verified output changed: {path}')
                     _require(path, mark)
                     authenticated[key] = path, sig
             backup = self._path(row['dst'])
-            if backup.relative_to(self.root).parts[0] != '_couchchd_backup':
-                raise SafetyError(f"Not a backup: {backup}")
+            original = self._library(Path(row['src']))
+            base = self.root / '_couchchd_backup'
+            if backup not in (base / self._rel(original), base / '.batches' / str(row['batch']) / self._rel(original)):
+                raise SafetyError(f"Not this original's journaled backup: {backup}")
             sig = None
             if row['state'] != 'purging' or os.path.lexists(backup):
                 sig = _signature(backup.lstat())
+                if sig[-1] != row['dstctime']:
+                    raise SafetyError(f'Quarantined original changed: {backup}')
                 _require(backup, row['dstmark'])
             backups.append((row['id'], backup, sig, [authenticated[k] for k in keys]))
         return backups
@@ -465,6 +531,14 @@ class Ledger:
         removed = 0
         for op, backup, sig, proofs in backups:
             if sig is not None:
+                if backup.suffix.casefold() in {'.cue', '.gdi'}:
+                    # A later owner may quarantine a shared track in a different
+                    # batch. Keep its descriptor ownership after unlink/crash.
+                    if _signature(self._path(backup).lstat()) != sig:
+                        raise SafetyError(f"Descriptor changed before purge: {backup}")
+                    names = _track_names(backup)
+                    self.db.execute('INSERT OR REPLACE INTO retired_sheets VALUES (?,?)',
+                                    (op, json.dumps(sorted(names))))
                 for path, check in proofs:
                     if _signature(self._path(path).lstat()) != check:
                         raise SafetyError(f"Output changed before purge: {path}")

@@ -226,6 +226,36 @@ def test_single_qml_window_handles_physical_actions(tmp_path):
         assert state.modal['kind'] == 'psp_formats'
         pad.action.emit('down'); pad.action.emit('confirm')
         assert state.modal['kind'] == 'settings' and prefs.value('pspFormat') == 'cso'
+        pad.action.emit('back')
+        pad.action.emit('previous')
+        assert state.section == 0
+
+        def pick(key, arg=None):
+            modal = bool(state.modal['kind'])
+            rows = state.modalRows if modal else state.rows
+            index = next(i for i, r in enumerate(rows) if r['key'] == key and (arg is None or r['arg'] == arg))
+            delta = index - win.property('dialogIndex' if modal else 'mainIndex')
+            for _ in range(abs(delta)):
+                pad.action.emit('down' if delta > 0 else 'up')
+            pad.action.emit('confirm')
+            QTest.qWait(20)
+
+        # Reach the end of a scrolling profile list and change a player with a
+        # controller at both supported host shapes, without a native picker.
+        for width, height in ((640, 480), (1280, 800)):
+            win.resize(width, height)
+            QTest.qWait(20)
+            assert (win.width(), win.height()) == (width, height)
+            pick('tool_export')
+            pick('tool_profiles')
+            pick('tool_profile_set', 'manual')
+            pick('tool_players')
+            was_on = 'ppsspp' in state.tools.players
+            pick('tool_player_toggle', 'ppsspp')
+            assert ('ppsspp' in state.tools.players) != was_on
+            assert state.modal['kind'] == 'pack_players' and len(QGuiApplication.allWindows()) == 1
+            pad.action.emit('back')
+            pad.action.emit('back')
         sdl.SDL_JoystickClose(stick)
         sdl.SDL_JoystickDetachVirtual(ident)
         pad.close()

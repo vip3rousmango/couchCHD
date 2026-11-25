@@ -12,7 +12,7 @@ curl -f https://vip3rousmango.github.io/couchCHD/i | sh
 
 This runs code from this repository as your current user. To inspect it first, download the script to a file, read it, then run `sh install-device.sh`. Don't use `sudo` on the Deck. No build machine, clone, Python installation, or GitHub login is required on the target.
 
-The installer selects the x86-64 AppImage, aarch64 tarball or single-card Recalbox image from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.15), verifies SHA-256 against the release manifest, and runs `--version` before activating it. Both architectures require **64-bit Linux userspace, glibc 2.36+**, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported.
+The installer selects the x86-64 AppImage, aarch64 tarball or single-card Recalbox image from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.16), verifies SHA-256 against the release manifest, and runs `--version` before activating it. Both architectures require **64-bit Linux userspace, glibc 2.36+**, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported.
 
 Desktop Linux gets an Applications menu entry and launches immediately if a graphical display is available. On appliances the installer registers the launcher, tells you how to refresh the menu, and leaves the current frontend running. Setup does not convert or purge anything.
 
@@ -62,12 +62,26 @@ app=~/.local/share/couchchd/run-couchchd  # or the full launcher path printed by
 
 This writes `ports/CouchCHD.sh`; it doesn't install an emulator or make an unsupported file type executable by a frontend. For launchers with an **Add application** workflow, point it at `run-couchchd` instead. Steam registration with artwork is available from inside CouchCHD's Settings. Console-only RetroArch/Lakka images without an external application launcher do not gain a Settings plugin. Neither macOS, Windows, musl-only Linux, nor 32-bit images can use these Linux binaries.
 
+### Choose a handheld by firmware and player
+
+Use **Handheld export** on your Deck or Bazzite machine. Choose the destination profile, confirm the player/core you actually use, then choose the games and the mounted card folder. The picker filters formats for that combination. It does not equate matching hardware, an Android launcher, or an SD volume label with a working emulator. When the firmware permits custom folders, choose the existing folder for that platform instead of letting an app invent a second library.
+
+See the [Linux and dual-boot device research](docs/anbernic-linux.md) and [Android device research](docs/anbernic-android.md) for model variants, specifications, firmware evidence, and a physical-device checklist. These are **export destinations**, not a list of tested native Linux installs. A console can play a transferred game without running CouchCHD. On the command line, `--handheld-profiles` lists profile IDs and compatible player IDs; use `--handheld-profile ID` and repeat `--handheld-player ID` with `--handheld-list` or `--handheld-export`.
+
+**Testing an unfamiliar handheld?** Start with one nonessential game and its existing save. Record the model suffix, firmware name/version, exact player/core, card folder, whether the frontend finds it, controller navigation, and (where applicable) a disc swap. On a shell-accessible console, run this non-installing report for CPU userspace, RAM and visible tools:
+
+```sh
+curl -fsS https://vip3rousmango.github.io/couchCHD/i | sh -s -- --device-report
+```
+
+The report does not scan ROMs, change files, or upload anything. If there's no shell, **Settings → About** plus the emulator version is sufficient to start a test report.
+
 ### Anbernic RG405M / Android / Daijishō
 
 **You can play the converted discs without installing CouchCHD on the handheld.** The stock [RG405M](https://anbernic.com/products/rg405m) has a 64-bit T618 and Android 12. Neither the Linux AppImage nor the glibc-based Recalbox ARM bundle is an Android app. Don't run the Linux installer on the RG405M or add its shell script as a Daijishō player.
 
 1. On Bazzite, a Steam Deck, or a remote supported Linux host, copy one game into a working ROM library (for example, `roms/psx/` with its `.cue` **and all referenced tracks**). Convert there with **Keep originals** or the [`--keep-originals` CLI example](#run-from-source). Wait for verification.
-2. Copy the resulting `.chd` to the handheld's SD card via a reader or USB file transfer. For a multi-disc set, copy the `.m3u` **and its `.chd_discs/` folder** together, without changing the relative paths. Keep the original library off-card until you've tested booting and changing discs.
+2. Choose **Handheld export**, select the titles, and point it at the mounted card's ROMs folder. CouchCHD copies supported PSX/Dreamcast CHDs, complete CHD playlists or PSP CHD/CSO, checks the copied bytes, skips identical files, and refuses conflicting copies. For MTP-only USB transfer, export to a local folder first, then transfer its contents yourself; that final manual copy is not verified by CouchCHD. Keep the master library until you've tested booting and changing discs.
 3. In Daijishō highlight the platform, choose **Add more → Select folder → Sync** (just **Sync** if the folder is already registered). Choose a [player that accepts the output](https://github.com/TapiocaFox/Daijishou/wiki/Players-and-File-Extensions). For PS1, [Beetle PSX](https://docs.libretro.com/library/beetle_psx/#chd) supports CHD and M3U; launch the playlist for disc swapping. For GameCube/Wii, [Dolphin recommends RVZ](https://dolphin-emu.org/docs/faq/#supported-dump-formats), not this CHD workflow. Changing a [player's filename filter](https://github.com/TapiocaFox/Daijishou/wiki/How-to-Use-Daijish%C5%8D) can make a game visible but can't teach the emulator a new format.
 
 For your PSP batch, select a current [PPSSPP](https://www.ppsspp.org/docs/getting-started/dumping-games/) build: CHD support starts at 1.17, and CouchCHD uses its recommended DVD image mode for PSP ISOs. Smoke-test a game in the chosen emulator before removing sources; a valid checksum does not prove that the installed player supports the image.
@@ -117,6 +131,56 @@ Choose a format for the **emulator that will play the game**, not just the small
 | Recognized single-cartridge ROMs for supported NES, SNES, Game Boy, GBA, N64, Mega Drive, Master System and Game Gear cores | `.7z` | One ROM per archive; verify the extracted bytes. Check that your frontend **and core** support archives. No arcade sets, BIOS collections, disc tracks or nested archives. |
 
 Multidisc organization is separate from compression. Don't assume that an emulator accepting CHD accepts M3U. After updating an EmuDeck library, rescan ES-DE or rerun Steam ROM Manager as appropriate. See [when to use CouchCHD alongside EmuDeck](docs/emudeck-comparison.md).
+
+### Mixed folders: loose discs and ZIPs
+
+Do **not** unpack an entire collection first. A normal scan distinguishes loose discs, supported single-disc ZIP packages, already-playable cartridge archives, and packages that need manual review. An archive is not permission to overwrite a loose game with the same output name.
+
+- **PSP ZIP → CSO:** choose CSO in Settings. CouchCHD reads the ISO member as a stream and opens it again to verify the resulting CSO sector by sector. The card needs space for the new output and a safety reserve, **not** for a temporary ISO.
+- **ZIP → CHD or RVZ:** these tools need a seekable disc file. CouchCHD stages one supported disc at a time, checks space on the actual scratch and output filesystems, and removes its temporary data on completion or cancellation. On one volume, budget for **the expanded disc plus a conservative output allowance and reserve**, in addition to the ZIP already on disk. To put the expanded copy on a different disk, choose a temporary workspace or pass `--scratch /path/to/existing/folder`.
+- **Original ZIPs stay put**, including under immediate cleanup. An emulator-ready output can be larger than its ZIP: packaging for play is not necessarily reclaiming space. ZIP conversions therefore do not count toward a space-recovery target. Encrypted, nested, ambiguous and unsupported packages are not bulk-extracted.
+
+Accepted disc ZIPs are stored or DEFLATE-compressed (including ZIP64), with one supported ISO/GCM or one CUE/GDI and only its referenced tracks. The reader limits a package to 256 entries, a 256 KiB central directory, a 1 MiB descriptor and 16 GiB of expanded disc data. Extra games, unrelated files and nested archives require manual review. The ZIP filename supplies the output title, not the internal ISO filename.
+
+For a read-only NTFS collection on Bazzite, use **mounted-folder ingest** into a separate writable library. Use the compressed catalog instead of ingest when another machine already has a playable output. Remote archive URLs and RAR/7z disc containers are not streamed as ZIPs; mount the source or handle unsupported packages separately.
+
+### Reuse compressed games across devices
+
+In **NAS / Cloud**, add named libraries: for example, the Deck's ROM folder, the Bazzite-mounted NTFS library, and the RG405M card while it is in a reader. Choose **Refresh**, browse the compressed inventory, then select a specific location and pull into a writable ROM library. A disconnected source keeps its last-seen inventory; it must be reachable to transfer. Matching paths identify possible copies, **not** identical discs or regions.
+
+Sources can be existing mounted directories (local, SMB, NFS, SSHFS) or **already configured** rclone remotes, including SFTP. For SFTP, verify the peer's SSH host key and configure rclone's `known_hosts_file`. A Pi without rclone can use an OS-mounted share. No CouchCHD listener, automatic device enrollment, background mirror or delete propagation. Each receiver remembers the libraries you add to it. An Android card in a reader is a source; Daijishō is not a network service.
+
+```sh
+couchchd --catalog-add 'Deck' deck:/home/deck/Emulation/roms
+couchchd --catalog-add 'Windows master' /mnt/windows/roms
+couchchd --catalog-refresh
+couchchd --catalog-list
+# Choose a source ID and a relative path from the listing:
+couchchd --catalog-pull SOURCE_ID 'psx/Example.chd' --dest /games/roms
+```
+
+`deck:` above must already exist in the **receiving** device's rclone configuration. Pull verifies transferred bytes, not emulator compatibility or the relationship to a raw ISO. Configured remote transfers may read the selected payload twice for independent verification. They do not add play-test marks or authorize deletion of any original.
+
+### Make room without guessing which originals to delete
+
+Choose a writable **working library** for conversion. If Bazzite can see a Windows NTFS drive with your master dumps, leave it mounted read-only and use it as an ingest source, not the conversion destination. Health checks and handheld exports can read a separate source folder without opening its conversion ledger.
+
+1. Run a **library health check** before a big batch. Findings explain what to fix; they do not rewrite descriptors or delete tracks.
+2. **Plan space** for all or selected systems. The plan shows estimates and excludes games that cannot be staged safely. Original files and verified outputs coexist until you reclaim space. An estimate is not a promise that this many bytes will be freed.
+3. Run the plan, then launch the new output **in your emulator**. Check an existing save, music, and disc swaps when applicable. Mark the verified output as play-tested; unmark it if something fails. CouchCHD cannot infer a successful play-test from the game's checksum.
+4. Preview reviewed cleanup and read the file list and affected batches before confirming. Permanent deletion ends Undo for the affected batches. **Keep an independent copy** of originals you cannot replace.
+
+The same workflow works over SSH. For example, on a **working copy** of a PSP library:
+
+```sh
+couchchd --root /games/roms --health
+couchchd --root /games/roms --system psp --plan-gib 10 > /tmp/space-plan.json
+cat /tmp/space-plan.json
+couchchd --root /games/roms --apply-plan /tmp/space-plan.json
+couchchd --root /games/roms --review
+```
+
+Use the ID from `--review` with `--mark-tested ID` after playing. `--review-cleanup` lists exactly which backups are eligible and returns a confirmation token. `--reclaim-reviewed TOKEN --yes` is the **scoped** cleanup command; the older `--purge --yes` is **not** a shortcut for it.
 
 ## Run from source
 

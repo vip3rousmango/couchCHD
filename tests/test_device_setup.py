@@ -48,6 +48,21 @@ def target(tmp_path):
     return tmp_path, env, data / 'couchchd', image
 
 
+def test_android_report_without_native_install(target):
+    tmp, env, base, _ = target
+    executable(tmp / 'tools/getprop', '''case "$1" in
+        ro.build.version.sdk) echo 31;;
+        ro.build.version.release) echo 12;;
+        ro.product.model) echo RG405M;;
+    esac''')
+    script = ['sh', str(SCRIPTS / 'install-device.sh')]
+    report = subprocess.run([*script, '--device-report'], cwd=tmp, env=env, capture_output=True, text=True, check=True)
+    assert 'OS: Android' in report.stdout and 'Model: RG405M' in report.stdout
+    attempt = subprocess.run(script, cwd=tmp, env=env, capture_output=True, text=True)
+    assert attempt.returncode != 0 and 'export destination' in attempt.stderr
+    assert not base.exists()
+
+
 @pytest.mark.parametrize('transport', ['github', 'push', 'pull'])
 def test_install_launch_and_reject_damaged_update(target, transport):
     tmp, env, base, image = target

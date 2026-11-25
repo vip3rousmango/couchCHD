@@ -635,42 +635,39 @@ def scan(root: Path) -> tuple[list[Game], list[Issue]]:
     return games, issues
 
 
-def unreferenced(path: Path, root: Path) -> bool:
-    """Check live descriptors *after* quarantine of the completed descriptor, under lock.
-
-    Even an unsupported system, incomplete sheet, or unreadable directory might own
-    this track. In ambiguous cases retain the original. Never follow library symlinks.
-    """
+def live_track_references(root: Path):
+    """Yield live sheets and their track paths. Unknown ownership raises, never guesses."""
     index: _DirectoryIndex = {}
 
     def fail(error: OSError) -> None:
         raise error
 
+    for base, dirs, files in os.walk(root, onerror=fail):
+        # Quarantined originals and application-owned scratch files aren't live games.
+        dirs[:] = [d for d in dirs if d.lower() not in {'_couchchd_backup', '.couchchd_tmp'}]
+        parent = Path(base)
+        for name in files:
+            if Path(name).suffix.lower() not in ('.cue', '.gdi'):
+                continue
+            desc = parent / name
+            for tracks, _ in _descriptors(desc):
+                try:
+                    resolved = {_resolve(parent, t.path, index) for t in tracks}
+                except ValueError:
+                    continue
+                yield desc, resolved
+                break
+            else:
+                raise ValueError(f'Cannot establish track ownership for {desc}')
+
+
+def unreferenced(path: Path, root: Path) -> bool:
+    """Check all live descriptors after quarantine; any unreadable sheet means retain."""
     try:
         root = root.resolve(strict=True)
         if path.is_symlink() or not path.resolve(strict=True).is_relative_to(root):
             return False
         path = path.resolve(strict=True)
-        for base, dirs, files in os.walk(root, onerror=fail):
-            # Quarantined originals and application-owned scratch files aren't live games.
-            dirs[:] = [d for d in dirs if d.lower() not in {'_couchchd_backup', '.couchchd_tmp'}]
-            parent = Path(base)
-            for name in files:
-                if Path(name).suffix.lower() not in ('.cue', '.gdi'):
-                    continue
-                desc = parent / name
-                found = False
-                for tracks, _ in _descriptors(desc):
-                    try:
-                        resolved = {_resolve(parent, t.path, index) for t in tracks}
-                    except ValueError:
-                        continue
-                    if path in resolved:
-                        return False
-                    found = True
-                    break
-                if not found:
-                    return False
+        return not any(path in refs for _, refs in live_track_references(root))
     except (OSError, ValueError):
         return False
-    return True

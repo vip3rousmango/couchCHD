@@ -139,39 +139,51 @@ def _preparing(on_item, key, name, system):
         raise
 
 
-def _mounted(root: Path, scratch: Path, systems: set[str], cancel: threading.Event, on_item):
+def _mounted(root: Path, scratch: Path, systems: set[str], cancel: threading.Event, on_item, on_issue):
     if scratch.resolve().is_relative_to(root):
         raise ValueError('Scratch must be outside the selected source directory')
     if not scanner.library_root_allowed(root):
         return
 
-    def raise_error(error: OSError) -> None:
-        raise error
-
-    for directory, dirs, names in os.walk(root, onerror=raise_error):
-        _cancelled(cancel)
-        directory = Path(directory)
-        dirs[:] = sorted(d for d in dirs if scanner.visible_directory(d) and not (directory / d).is_symlink())
-        for name in sorted(names):
-            _cancelled(cancel)
-            source = directory / name
-            relative = source.relative_to(root)
-            if not _visible(relative) or source.is_symlink():
-                continue
-            route = _destination(relative, root, systems)
-            if route is None:
-                continue
-            system, output = route
+    # Index titles before staging any payload. Two inputs (e.g. Game.iso and
+    # Game.zip) must not race to publish the same flattened frontend filename.
+    games, issues = scanner.scan(root)
+    routes = []
+    counts = {}
+    for game in games:
+        if game.system in systems:
+            folder = scanner.system_folder(root, game.source)
+            relative = Path(game.system) / game.source.relative_to(folder)
+            output = scanner.output_path(relative, game.mode)
             scanner.safe_relative_name(output.as_posix())
-            st = source.lstat()
-            if not stat.S_ISREG(st.st_mode) or time.time() - st.st_mtime < 10:
-                continue
-            with ExitStack() as disc:
-                key = str(source)
-                with _preparing(on_item, key, name, system):
-                    game = scanner.inspect(source, system, fresh=True)
+            key = game.system, output.name.casefold()
+            counts[key] = counts.get(key, 0) + 1
+            routes.append((game, output, key))
+    for game, output, route in routes:
+        _cancelled(cancel)
+        key = str(game.source)
+        if counts[route] != 1:
+            reason = f'Ambiguous output for {key}; compare the loose and archived sources before converting.'
+            if on_issue:
+                on_issue(reason)
+            if on_item:
+                on_item(ItemProgress(key, game.source.name, game.system, 'skipped', detail=reason))
+            continue
+        with ExitStack() as disc:
+            if game.archive:
+                # The runner validates and stages a single member set itself;
+                # making a second ZIP copy here would consume another ROM's space.
+                game.assert_unchanged()
+                if on_item:
+                    on_item(ItemProgress(key, game.source.name, game.system, 'queued'))
+                staged = game
+            else:
+                with _preparing(on_item, key, game.source.name, game.system):
                     staged = disc.enter_context(stage(game, scratch, cancel=cancel))
-                yield staged, output, key
+            yield staged, output, key
+    for issue in issues:
+        if on_issue and scanner.library_system(root, issue.path) in systems:
+            on_issue(f'{issue.path.name}: {issue.reason}')
 
 
 def _rclone(args: list[str], cancel: threading.Event) -> bytes:
@@ -275,7 +287,7 @@ def _cloud(remote: str, scratch: Path, systems: set[str], cancel: threading.Even
 
 
 def games(remote: str, scratch: Path, systems: set[str], cancel: threading.Event,
-          on_item=None) -> Iterator[tuple[scanner.Game, Path, str]]:
+          on_item=None, on_issue=None) -> Iterator[tuple[scanner.Game, Path, str]]:
     """Yield a staged game, its default library-relative output and original source key.
 
     Consume the game before advancing the iterator. Close the iterator on early
@@ -288,6 +300,6 @@ def games(remote: str, scratch: Path, systems: set[str], cancel: threading.Event
         raise ValueError('Choose a mounted directory or a configured rclone remote')
     mount = Path(remote).expanduser()
     if mount.is_dir():
-        yield from _mounted(mount.resolve(), scratch, systems, cancel, on_item)
+        yield from _mounted(mount.resolve(), scratch, systems, cancel, on_item, on_issue)
     else:
         yield from _cloud(remote, scratch, systems, cancel, on_item)

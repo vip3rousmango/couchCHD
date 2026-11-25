@@ -114,7 +114,7 @@ ApplicationWindow {
                         TapHandler { onTapped: library.switchTab(tab.index) }
                         Text {
                             id: tabTitle; anchors.fill: parent; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter
-                            text: window.compact ? ["Library", "Systems", "M3U", "Ingest", "History"][tab.index] : tab.modelData
+                            text: window.compact ? ["Library", "Systems", "M3U", "NAS / Cloud", "History"][tab.index] : tab.modelData
                             elide: Text.ElideRight; font.pixelSize: 22 * window.u
                             color: tab.index === library.section ? "#e1f3b4" : "#b7c4b8"
                             font.weight: tab.index === library.section ? Font.DemiBold : Font.Normal

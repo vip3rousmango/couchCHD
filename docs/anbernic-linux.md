@@ -1,6 +1,6 @@
 # Which library should I give my ANBERNIC Linux handheld?
 
-**Use the firmware already on your handheld.** Prepare a copy on the library computer (for example the Dell, Bazzite PC, Deck or Pi); the handheld only needs to **play** it. Find a game that already appears in the handheld's menu and use the same games card, system folder and emulator for the first trial. If you can't identify those three things, keep the original format. A smaller file that disappears from the menu is not an upgrade.
+**Use the firmware already on your handheld.** Prepare a copy on the library computer (for example your Bazzite PC, Deck or Pi); the handheld only needs to **play** it. Find a game that already appears in the handheld's menu and use the same games card, system folder and emulator for the first trial. If you can't identify those three things, keep the original format. A smaller file that disappears from the menu is not an upgrade.
 
 **Evidence boundary — 2026-11-25.** The rows below are manufacturer specifications, actual release files and emulator documentation, **not hardware test results or a list of implemented picker presets**. The RG405M host-side handoff is the existing point of reference; it does not validate another firmware, core, BIOS or game. No Linux handheld playback, full-speed claim, native CouchCHD install or firmware migration is certified by this guide. Nothing here requires flashing a card, unlocking a bootloader, rooting Android or changing eMMC. Links to firmware identify it; they are not instructions to install it.
 

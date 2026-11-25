@@ -26,11 +26,15 @@ def is_recalbox() -> bool:
     return _RECALBOX.is_dir()
 
 
-def is_pi() -> bool:
+def _board_model() -> bytes:
     try:
-        return b'raspberry pi' in _MODEL.read_bytes().lower()
+        return _MODEL.read_bytes().lower()
     except OSError:
-        return False
+        return b''
+
+
+def is_pi() -> bool:
+    return b'raspberry pi' in _board_model()
 
 
 def native_root(frontend: str) -> Path:
@@ -103,16 +107,17 @@ def compression_plan(preset: str) -> CompressionPlan:
         return CompressionPlan(budget, False)
 
     ram = hardware.memory_bytes()
-    pi = is_pi()
+    model = _board_model()
+    handheld_board = b'anbernic' in model or b'raspberry pi' in model
     # Also protect small ARM boards with an unreadable device tree and
     # low-RAM Linux systems. MemTotal excludes firmware/kernel reservations:
     # 3 GiB separates 1/2 GiB Pi 4s from 4/8 GiB models.
     arm_board = cpus <= 4 and platform.machine().lower() in ('arm64', 'aarch64', 'armv7l')
     low_ram = ram is not None and ram < 3 * 1024**3
-    if not (pi or arm_board or (cpus <= 8 and low_ram) or _steam_deck()):
+    if not (handheld_board or arm_board or (cpus <= 8 and low_ram) or _steam_deck()):
         return CompressionPlan(budget, False)
     budget = min(budget, max(1, (3 * cpus + 2) // 5))  # nearest logical CPU to 60%
-    if pi or arm_board:
+    if handheld_board or arm_board:
         budget = min(budget, 1 if ram is None or low_ram else 2)
     elif low_ram:
         budget = 1
