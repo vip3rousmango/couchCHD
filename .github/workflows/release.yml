@@ -1,6 +1,12 @@
 name: Native Linux release candidates
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: Packages to qualify
+        type: choice
+        default: all
+        options: [all, android]
   push:
     tags: ['v*']
 permissions:
@@ -15,9 +21,11 @@ jobs:
           persist-credentials: false
       - name: Install Android 12 emulator and build tools
         run: |
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "platform-tools" "emulator" "system-images;android-31;google_apis;x86_64" >/dev/null
+          # The AOSP image uses the standard SDK license already installed on hosted
+          # runners. Receive needs no Play services or Google APIs preview image.
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "emulator" "system-images;android-31;default;x86_64"
           sudo chmod a+rw /dev/kvm
-          echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n receiver -k 'system-images;android-31;google_apis;x86_64'
+          echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n receiver -k 'system-images;android-31;default;x86_64'
           nohup "$ANDROID_HOME/emulator/emulator" -avd receiver -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >"$RUNNER_TEMP/emulator.log" 2>&1 </dev/null &
       - name: Build signed Android companion
         if: github.event_name == 'push'
@@ -65,6 +73,7 @@ jobs:
           path: ${{ runner.temp }}/receiver-screen.png
           if-no-files-found: ignore
   package:
+    if: github.event_name == 'push' || inputs.target != 'android'
     strategy:
       fail-fast: false
       matrix:

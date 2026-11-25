@@ -2,7 +2,7 @@
 # No arguments: install the pinned GitHub release. SSH transports are optional.
 set -eu
 umask 077
-channel=v0.1.0-preview.17
+channel=v0.1.0-preview.18
 recalbox=/recalbox
 media=/media
 mountinfo=/proc/self/mountinfo
