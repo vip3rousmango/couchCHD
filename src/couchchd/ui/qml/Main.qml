@@ -90,6 +90,7 @@ ApplicationWindow {
                     Layout.fillWidth: true; text: library.location; textFormat: Text.PlainText
                     elide: Text.ElideMiddle; color: "#c0caba"; font.pixelSize: 21 * window.u
                 }
+                Text { visible: library.queueVisible; text: library.space + " free in library"; color: "#d3dbcf"; font.pixelSize: 21 * window.u }
                 Command { visible: !library.queueVisible; label: "Settings"; glyph: router.glyphs[4]; compact: true; unit: window.u; enabled: !library.busy; onActivated: window.route("settings") }
             }
         }
@@ -147,8 +148,8 @@ ApplicationWindow {
                 Layout.fillWidth: true; Layout.topMargin: 7 * window.u; Layout.bottomMargin: 4 * window.u; spacing: 22 * window.u
                 Text { text: library.summary; color: "#d9ebbe"; font.pixelSize: 21 * window.u; font.weight: Font.DemiBold }
                 Item { Layout.fillWidth: true }
-                Text { text: library.space + " free at scan"; color: "#d3dbcf"; font.pixelSize: 21 * window.u }
-                Text { visible: !window.compact || window.width >= 840; text: "Last batch: " + library.savings + " saved"; color: "#d3dbcf"; font.pixelSize: 21 * window.u }
+                Text { text: library.space + " free in library"; color: "#d3dbcf"; font.pixelSize: 21 * window.u }
+                Text { visible: !window.compact || window.width >= 840; text: "Compression difference: " + library.savings; color: "#d3dbcf"; font.pixelSize: 21 * window.u }
             }
             Rectangle {
                 Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 40

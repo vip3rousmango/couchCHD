@@ -5,6 +5,7 @@ import hashlib
 import os
 import shutil
 import sqlite3
+import time
 import uuid
 from collections import Counter, deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -14,10 +15,10 @@ from functools import partial
 from pathlib import Path
 
 from . import cloud_ingest, converter, hardware, scanner
+from .output_formats import can_replace_source
 from .telemetry import ItemProgress
 
 GIB = 1024**3
-NETWORK = {'nfs', 'cifs', 'sshfs'}
 
 
 def child_dir(root: Path, relative: Path) -> Path:
@@ -60,6 +61,18 @@ class Job:
     local: bool
     origin: str | None = None  # ingest scratch paths are not persistent identities
 
+    @property
+    def may_move_original(self):
+        # XISO and trimmed 3DS preserve game content, not a byte-exact disc dump.
+        return self.local and can_replace_source(self.output)
+
+    def output_bound(self):
+        size = self.game.size
+        if self.game.mode == 'createcd':
+            size = max(size, sum((frames + 3) // 4 * 4 for frames in self.game.frames) * 2448)
+        # Do not assume media compresses: containers also need headers and indexes.
+        return size + (size + 31) // 32 + 64 * 1024
+
     def report(self, callback, stage, percent=None, mib_s=None, cpu_percent=None, detail=''):
         if callback is not None:
             callback(ItemProgress(self.origin or str(self.game.source), self.game.source.name, self.game.system,
@@ -68,10 +81,12 @@ class Job:
 
 class Batch:
     def __init__(self, root, scratch, db, batch, tool, guard, plan, quarantine, immediate, progress, cancel,
-                 on_item=None):
+                 on_item=None, on_space=None):
         self.root, self.scratch, self.db, self.batch = root, scratch, db, batch
         self.tool, self.guard, self.plan = tool, guard, plan
         self.quarantine, self.cancel, self.on_item = quarantine, cancel, on_item
+        self.on_space = on_space
+        self.next_space_sample = 0.0
         self.native_progress = progress
         self.progress = progress or (lambda _: None)
         # The coordinator sees the device's full available set; portable_budget
@@ -87,23 +102,27 @@ class Batch:
         self.root_identity = fingerprint(root)[:2]
 
     def _location(self, job):
+        if job.output.name != scanner.output_path(job.game.source, job.game.mode).name:
+            raise ValueError(f'Destination does not match the selected format: {job.output}')
         if fingerprint(self.root)[:2] != self.root_identity:
             raise OSError('Library mount changed; reselect the original library.')
         directory = child_dir(self.root, job.output.parent.relative_to(self.root))
         kind = hardware.fs_type(directory)
-        if kind == 'fat32' and job.game.size >= 4 * GIB:
+        if kind == 'fat32' and job.output_bound() >= 4 * GIB:
             raise ValueError('FAT32 cannot safely stage this image; use exFAT or another filesystem.')
         if job.output.exists() or job.output.is_symlink():
             raise FileExistsError(f'Output already exists: {job.output}')
-        if (directory / '.chd_discs' / job.output.name).exists():
+        if job.output.suffix.lower() == '.chd' and (directory / '.chd_discs' / job.output.name).exists():
             raise FileExistsError(f'An organized disc already exists: {job.output.name}')
-        staging = job.local and hardware.fs_type(job.game.source) in NETWORK
-        work = self.scratch if staging or kind in NETWORK else child_dir(directory, Path('.couchchd_tmp'))
+        staging = job.local and hardware.fs_type(job.game.source) in cloud_ingest.NETWORK
+        work = self.scratch if staging or kind in cloud_ingest.NETWORK else child_dir(directory, Path('.couchchd_tmp'))
         return work, staging
 
     def _prepare(self, job, work, stage, target, threads):
         context = cloud_ingest.stage(job.game, work, cancel=self.cancel) if stage else nullcontext(job.game)
         with context as game:
+            if game.mode != job.game.mode:
+                raise ValueError(f'Staged format changed for {job.game.source.name}; input retained.')
             on_stage = partial(job.report, self.on_item) if self.on_item is not None else None
             converter.convert(game, target, self.tool, cancel=self.cancel, threads=threads,
                               progress=self.native_progress, on_stage=on_stage, device_cpus=self.device_cpus,
@@ -134,7 +153,7 @@ class Batch:
         self.sources.update(job.game.files)
         self.saved += new_bytes - size
         self.progress(f'Verified: {job.output.name} (compression delta {new_bytes - size} bytes)')
-        if self.quarantine and job.local:
+        if self.quarantine and job.may_move_original:
             game = job.game
             game.assert_unchanged()
             backups = []
@@ -147,6 +166,8 @@ class Batch:
                 backups.append(self.db.quarantine(self.batch, path, expected=sig, outputs=[job.output]))
             if self.immediate:
                 self.db.purge_job(self.batch, backups)
+        elif self.quarantine and job.local:
+            self.progress(f'Original retained: {job.game.source.name} (required for this format).')
 
     def _error(self, exc, name):
         stage = 'failed'
@@ -186,8 +207,8 @@ class Batch:
                        detail=self.paused)
 
     def _dispatch(self, pending):
-        total = sum(j.game.size for j in pending)
-        if hardware.free_bytes(self.root) < total * 0.6:
+        total = sum(j.output_bound() for j in pending)
+        if hardware.free_bytes(self.root) < total:
             ordered = sorted(pending, key=lambda j: j.game.size)
             pending.clear()
             pending.extend(ordered)
@@ -209,6 +230,9 @@ class Batch:
                     if reason.lower().startswith(('suspend', 'resume')) and not self.cancel.is_set():
                         self.cancel.wait(0.25)
                         continue  # do not publish finished jobs during the remount window
+                    if self.on_space is not None and time.monotonic() >= self.next_space_sample:
+                        self.on_space(hardware.free_bytes(self.root))
+                        self.next_space_sample = time.monotonic() + 5
                     cpus = self.plan.cpus if self.plan.portable else min(self.plan.cpus, self.guard.limit())
                     cap = min(width, cpus)
                     while (pending and len(active) < cap and not self.cancel.is_set()
@@ -216,13 +240,21 @@ class Batch:
                         job = pending[0]
                         try:
                             work, stage = self._location(job)
-                            # Group reservations by device; NAS output and local scratch
-                            # may need simultaneous headroom, not just the final CHD.
-                            estimate = (job.game.size * 6 + 9) // 10 + GIB
+                            # On one filesystem publication renames the prepared file.
+                            # Across mounts it briefly needs the full file on both.
+                            estimate = job.output_bound() + GIB
+                            scratch = job.game.size if stage else 0
+                            if job.game.sheet:
+                                # chdman can require private copies of track extents.
+                                scratch += job.game.size
                             needs = {}
-                            volumes = [(job.output.parent, estimate), (work, estimate + (job.game.size if stage else 0))]
-                            if self.quarantine and job.local and job.game.source.stat().st_dev != self.root_identity[0]:
-                                volumes.append((self.root, job.game.size + GIB))
+                            volumes = [(job.output.parent, estimate), (work, estimate + scratch)]
+                            if self.quarantine and job.may_move_original and job.game.source.stat().st_dev != self.root_identity[0]:
+                                # The output remains live during cross-device quarantine.
+                                backup = job.game.size + GIB
+                                if job.output.parent.stat().st_dev == self.root_identity[0]:
+                                    backup += job.output_bound()
+                                volumes.append((self.root, backup))
                             for location, amount in volumes:
                                 device = location.stat().st_dev
                                 if device not in needs or needs[device][1] < amount:
@@ -233,7 +265,8 @@ class Batch:
                                     self.paused = f'Insufficient headroom for {job.output.name}. Free space and resume.'
                                     self.progress(self.paused)
                                 break
-                            target = work / (uuid.uuid4().hex + '.chd.part')
+                            name = scanner.output_path(Path(uuid.uuid4().hex), job.game.mode).name
+                            target = work / (name + '.part')
                             self.progress(f'Preparing: {job.game.source.name}')
                             if job.local:
                                 job.report(self.on_item, 'preparing')
@@ -277,10 +310,10 @@ class Batch:
                                 reserved[dev] -= amount
                             if len(self.outputs) > published_before:
                                 # Quarantine, purge, or scratch cleanup can fail *after*
-                                # the ledger has committed a verified CHD.
+                                # the ledger has committed a verified output.
                                 stage = 'done'
                                 if detail:
-                                    detail = f'CHD verified and published. Post-publication error: {detail}'
+                                    detail = f'{job.output.name} verified and published. Post-publication error: {detail}'
                             job.report(self.on_item, stage, 100.0 if stage == 'done' else None, detail=detail)
             finally:
                 if active:

@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import __version__, profiles
+from . import __version__, profiles, scanner
 
 
 def _parser():
@@ -21,7 +21,7 @@ def _parser():
     actions = p.add_mutually_exclusive_group()
     actions.add_argument('--register-frontend', nargs=2, metavar=('FRONTEND', 'LAUNCHER'),
                          help='register an installed launcher; use ports + --root for a custom shell-compatible library')
-    actions.add_argument('--auto', action='store_true', help='compress selected systems and quarantine verified originals')
+    actions.add_argument('--auto', action='store_true', help='convert selected systems and quarantine eligible verified originals')
     actions.add_argument('--history', action='store_true', help='show the batch ledger')
     actions.add_argument('--undo', action='store_true', help='restore originals from the most recent undoable batch')
     actions.add_argument('--purge', action='store_true', help='permanently purge verified backups (requires --yes)')
@@ -30,7 +30,8 @@ def _parser():
     p.add_argument('--yes', action='store_true', help='confirm permanent backup purge')
     p.add_argument('--keep-originals', action='store_true', help='leave input files in place instead of quarantining')
     p.add_argument('--ingest', metavar='SOURCE', help='read-only mounted library path or rclone remote for --auto')
-    p.add_argument('--system', action='append', choices=['psx', 'segacd', 'saturn', 'dreamcast', 'ps2', 'psp'], help='restrict batch to this system; repeat to combine')
+    p.add_argument('--system', action='append', choices=sorted(scanner.SYSTEM_LABELS), help='restrict batch to this system; repeat to combine')
+    p.add_argument('--psp-format', choices=('chd', 'cso'), help='output format for PSP ISO files (default: chd)')
     p.add_argument('--preset', choices=('silent', 'balanced', 'docked'), help='CPU profile; defaults to silent on battery')
     return p
 
@@ -76,8 +77,8 @@ def main(argv=None):
         parser.error('--purge permanently deletes verified originals. Supply --yes to confirm.')
     if bool(args.extract) != bool(args.dest):
         parser.error('--extract CHD and --dest DIRECTORY must be used together')
-    if (args.ingest or args.system or args.keep_originals or args.preset) and not args.auto:
-        parser.error('--ingest, --system, --keep-originals and --preset require --auto')
+    if (args.ingest or args.system or args.keep_originals or args.preset or args.psp_format) and not args.auto:
+        parser.error('--ingest, --system, --keep-originals, --preset and --psp-format require --auto')
     if args.yes and not args.purge:
         parser.error('--yes is only meaningful with --purge')
     if args.register_frontend:
@@ -133,6 +134,7 @@ def main(argv=None):
             previous = signal.signal(signal.SIGINT, lambda *_: cancel.set())
             try:
                 result = app.run(systems=set(args.system) if args.system else None, ingest=args.ingest,
+                                 psp_format=args.psp_format or 'chd',
                                  quarantine=not args.keep_originals, preset=args.preset or profiles.default_preset(),
                                  progress=lambda message: print(message, file=sys.stderr, flush=True), cancel=cancel)
             finally:

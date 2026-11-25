@@ -68,11 +68,11 @@ ColumnLayout {
         Layout.topMargin: 5 * pane.unit; Layout.bottomMargin: (pane.height < 600 * pane.unit ? 12 : 22) * pane.unit
         Text {
             Layout.fillWidth: true; font.pixelSize: (pane.narrow ? 19 : 22) * pane.unit; color: "#d3dfcb"
-            text: pane.queue.total + (pane.queue.total === 1 ? " disc" : " discs") + "   ·   " + pane.queue.activeCount + " active   ·   " + pane.queue.verified + " verified"
+            text: pane.queue.total + (pane.queue.total === 1 ? " game" : " games") + "   ·   " + pane.queue.activeCount + " active   ·   " + pane.queue.verified + " verified"
         }
         Text {
             visible: !pane.narrow && pane.queue.total > 0; font.pixelSize: 19 * pane.unit; color: "#b7c4b8"
-            text: (pane.following && pane.queue.activeIndex >= 0 ? "Following disc " : "Viewing disc ") + (pane.selected + 1) + " of " + pane.queue.total
+            text: (pane.following && pane.queue.activeIndex >= 0 ? "Following game " : "Viewing game ") + (pane.selected + 1) + " of " + pane.queue.total
         }
     }
     component Heading: Text {
@@ -81,7 +81,7 @@ ColumnLayout {
     RowLayout {
         Layout.fillWidth: true; Layout.leftMargin: pane.gutter + 16 * pane.unit; Layout.rightMargin: pane.gutter + 26 * pane.unit
         Layout.bottomMargin: 9 * pane.unit; spacing: pane.columnGap
-        Heading { Layout.fillWidth: true; text: "Source disc" }
+        Heading { Layout.fillWidth: true; text: "Source file" }
         Heading { Layout.preferredWidth: pane.phaseWidth; text: "Phase" }
         Heading { visible: !pane.narrow; Layout.preferredWidth: pane.speedWidth; horizontalAlignment: Text.AlignRight; text: "Est. input speed" }
         Heading { visible: !pane.narrow; Layout.preferredWidth: pane.cpuWidth; horizontalAlignment: Text.AlignRight; text: "Device CPU" }
@@ -157,14 +157,14 @@ ColumnLayout {
         }
         Text {
             anchors.centerIn: parent; width: parent.width - 30; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
-            visible: !pane.queue.total; text: library.queueResult ? "No source discs entered this queue." : "Looking for source discs…"
+            visible: !pane.queue.total; text: library.queueResult ? "No games entered this queue." : "Looking for eligible games…"
             font.pixelSize: 23 * pane.unit; color: "#c4d0c2"
         }
     }
     Text {
         Layout.fillWidth: true; Layout.leftMargin: pane.gutter; Layout.rightMargin: pane.gutter
         Layout.topMargin: 9 * pane.unit; Layout.bottomMargin: 10 * pane.unit
-        text: "Speed estimates logical input processed. CPU is this disc’s share of total device capacity."
+        text: "Speed estimates logical input processed. CPU is this job’s share of total device capacity."
         color: "#bdcbbb"; font.pixelSize: (pane.narrow ? 16 : 18) * pane.unit; wrapMode: Text.Wrap
     }
     Rectangle {

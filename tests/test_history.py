@@ -210,19 +210,26 @@ def test_metadata_and_art_roundtrip_and_numeric_playlist(tmp_path):
         assert xml.read_bytes() == original and first_art.read_bytes() == b'scraped cover'
 
 
-def test_purge_verifies_cross_batch_organized_locations(tmp_path):
-    with Ledger(tmp_path) as ledger:
+@pytest.fixture
+def psx(tmp_path):
+    folder = tmp_path / 'psx'
+    folder.mkdir()
+    return folder
+
+
+def test_purge_verifies_cross_batch_organized_locations(psx):
+    with Ledger(psx) as ledger:
         for n in (1, 2):
             batch = ledger.begin()
-            cue = tmp_path / f'Game (CD {n} of 2).cue'
+            cue = psx / f'Game (CD {n} of 2).cue'
             cue.write_bytes(b'original')
             disc = publish(ledger, batch, cue.with_suffix('.chd'))
             ledger.quarantine(batch, cue, outputs=[disc])
-            organize(tmp_path, batch, ledger, [disc])
+            organize(psx, batch, ledger, [disc])
             ledger.finish(batch)
-        assert (tmp_path / 'Game.m3u').is_file()
+        assert (psx / 'Game.m3u').is_file()
         assert set(p.parent.name for p in ledger.verified()) == {'.chd_discs'}
-        foreign = tmp_path / '_couchchd_backup' / 'other'
+        foreign = psx / '_couchchd_backup' / 'other'
         foreign.write_bytes(b'mine')
         assert ledger.purge() == 2 and ledger.purge() == 0
         assert foreign.read_bytes() == b'mine'
@@ -232,42 +239,54 @@ def test_purge_verifies_cross_batch_organized_locations(tmp_path):
 
 
 @pytest.mark.parametrize('tags', [('Disc 1',), ('Disc 1', 'Disc 3'), ('Disc 1 of 3', 'Disc 2 of 3'), ('Disc 1', 'Disk 1')])
-def test_ambiguous_or_incomplete_sets_untouched(tmp_path, tags):
-    with Ledger(tmp_path) as ledger:
+def test_ambiguous_or_incomplete_sets_untouched(psx, tags):
+    with Ledger(psx) as ledger:
         batch = ledger.begin()
-        discs = [publish(ledger, batch, tmp_path / f'Game ({tag}).chd') for tag in tags]
-        organize(tmp_path, batch, ledger, discs)
-        assert not (tmp_path / 'Game.m3u').exists()
+        discs = [publish(ledger, batch, psx / f'Game ({tag}).chd') for tag in tags]
+        organize(psx, batch, ledger, discs)
+        assert not (psx / 'Game.m3u').exists()
         assert all(p.is_file() for p in discs)
 
 
-def test_preexisting_playlist_and_external_chds_never_adopted(tmp_path):
-    with Ledger(tmp_path) as ledger:
+def test_preexisting_playlist_and_external_chds_never_adopted(psx):
+    with Ledger(psx) as ledger:
         batch = ledger.begin()
-        discs = [publish(ledger, batch, tmp_path / f'Game (Disc {n}).chd') for n in [1, 2]]
-        external = tmp_path / 'Game (Disc 3).chd'
+        discs = [publish(ledger, batch, psx / f'Game (Disc {n}).chd') for n in [1, 2]]
+        external = psx / 'Game (Disc 3).chd'
         external.write_bytes(b'not owned')
-        organize(tmp_path, batch, ledger, [*discs, external])
-        assert not (tmp_path / 'Game.m3u').exists()
-        external.rename(tmp_path / 'other.chd')
-        custom = tmp_path / 'favorites.m3u'
+        organize(psx, batch, ledger, [*discs, external])
+        assert not (psx / 'Game.m3u').exists()
+        external.rename(psx / 'other.chd')
+        custom = psx / 'favorites.m3u'
         custom.write_text('./Game (Disc 1).chd\n')
-        organize(tmp_path, batch, ledger, discs)
+        organize(psx, batch, ledger, discs)
         assert all(p.is_file() for p in discs) and custom.is_file()
 
 
-def test_recalbox_running_frontend_warns_before_metadata_changes(tmp_path, monkeypatch):
+def test_recalbox_running_frontend_warns_before_metadata_changes(psx, monkeypatch):
     monkeypatch.setattr(multidisc, '_recalbox', lambda _: True)
     monkeypatch.setattr(multidisc, '_frontend_running', lambda: True)
-    xml = tmp_path / 'gamelist.xml'
+    xml = psx / 'gamelist.xml'
     xml.write_text('<gameList/>')
-    with Ledger(tmp_path) as ledger:
+    with Ledger(psx) as ledger:
         batch = ledger.begin()
-        discs = [publish(ledger, batch, tmp_path / f'Game (Disc {n}).chd') for n in (1, 2)]
+        discs = [publish(ledger, batch, psx / f'Game (Disc {n}).chd') for n in (1, 2)]
         with pytest.warns(UserWarning, match='Recalbox'):
-            messages = organize(tmp_path, batch, ledger, discs)
+            messages = organize(psx, batch, ledger, discs)
         assert any('stop EmulationStation' in message for message in messages)
         assert xml.read_text() == '<gameList/>' and all(p.is_file() for p in discs)
+
+
+@pytest.mark.parametrize(('system', 'suffix'), [('ps2', '.chd'), ('psp', '.chd'), ('3do', '.chd'),
+                                                ('gc', '.rvz'), ('psp', '.cso'), ('snes', '.7z')])
+def test_incompatible_playlist_formats_remain_visible(tmp_path, system, suffix):
+    folder = tmp_path / system
+    folder.mkdir()
+    with Ledger(tmp_path) as ledger:
+        batch = ledger.begin()
+        discs = [publish(ledger, batch, folder / f'Game (Disc {n}){suffix}') for n in (1, 2)]
+        assert organize(tmp_path, batch, ledger, discs) == []
+        assert all(p.is_file() for p in discs) and not list(folder.glob('*.m3u'))
 
 
 def test_job_purge_preserves_other_backups_and_potentially_shared_track(tmp_path):

@@ -11,11 +11,14 @@ import warnings
 import xml.etree.ElementTree as ET
 
 from .ledger import Ledger, SafetyError
+from .scanner import SYSTEMS
 
 
 _DISC = re.compile(r'^(?P<title>.+?)\s*\((?:Disc|Disk|CD)\s*(?P<n>[0-9]{1,3})(?:\s*of\s*(?P<total>[0-9]{1,3}))?\)(?P<variant>.*)$', re.I)
 _IMAGES = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.avif'}
 _SOURCES = {'.chd', '.iso', '.gdi', '.cue'}
+# Only hide individual discs when both frontend discovery and playback support M3U.
+PLAYLIST_SYSTEMS = frozenset({'psx', 'segacd', 'saturn', 'dreamcast'})
 
 
 def _disc(stem: str):
@@ -229,12 +232,16 @@ def organize(root: Path, batch: int, ledger: Ledger, outputs: list[Path]) -> lis
     for path in outputs:
         p = Path(path)
         p = p if p.is_absolute() else root / p
+        if p.suffix.casefold() != '.chd' or SYSTEMS.get(p.parent.name.casefold()) not in PLAYLIST_SYSTEMS:
+            continue
         d = _disc(p.stem)
         if d:
             touched.add((p.parent, d[0]))
+    if not touched:
+        return []
     groups = defaultdict(list)
     for p in ledger.verified():
-        if not p.is_relative_to(root) or p.parent.name == '.chd_discs':
+        if p.suffix.casefold() != '.chd' or not p.is_relative_to(root) or p.parent.name == '.chd_discs':
             continue
         d = _disc(p.stem)
         if d and (p.parent, d[0]) in touched:

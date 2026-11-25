@@ -12,13 +12,28 @@ from PySide6.QtCore import (QAbstractListModel, QModelIndex, QObject, Property, 
                             QSettings, QStandardPaths, Qt, Signal, Slot)
 
 from ..app import Backend
-from .. import cloud_ingest, profiles, updater
+from .. import cloud_ingest, hardware, profiles, scanner, updater
+from ..output_formats import SUFFIX_BY_MODE
 from ..telemetry import ItemProgress
 from . import launcher_art, steam
 
-SYSTEMS = {'psx': 'PlayStation', 'segacd': 'Sega CD', 'saturn': 'Sega Saturn', 'dreamcast': 'Dreamcast', 'ps2': 'PlayStation 2', 'psp': 'PSP'}
 PRESETS = {'silent': 'Handheld Silent', 'balanced': 'Balanced', 'docked': 'Docked Max'}
 TITLES = ['Dashboard', 'Systems', 'Multi-disc & M3U', 'Cloud ingest', 'History & backups']
+PSP_FORMATS = {
+    'chd': 'CHD · PPSSPP 1.17 or newer',
+    'cso': 'CSO · Also works with older PPSSPP versions',
+}
+
+
+def _output_label(system, ext, psp_format):
+    if system == 'psp':
+        return psp_format.upper()
+    mode = scanner.default_mode(system, ext)
+    if mode == 'trim3ds':
+        return 'Trimmed 3DS'
+    if mode == 'xiso':
+        return 'XISO'
+    return SUFFIX_BY_MODE[mode].lstrip('.').upper()
 
 
 def size(count: int) -> str:
@@ -60,9 +75,9 @@ def _when(value):
 
 
 POLICIES = {
-    'quarantine': ('Quarantine', 'Move eligible originals into a recoverable backup.'),
+    'quarantine': ('Keep a backup', 'Back up eligible originals so you can Undo. Backups still use space.'),
     'keep': ('Keep in place', 'Leave originals in their current folders.'),
-    'immediate': ('Delete immediately', 'Permanently delete verified originals; Undo cannot restore them.'),
+    'immediate': ('Delete immediately', 'Permanently delete eligible verified originals; Undo cannot restore them.'),
 }
 
 
@@ -101,7 +116,7 @@ class QueueModel(QAbstractListModel):
         field = self._fields[role - self._first]
         value = getattr(item, field)
         if field == 'system':
-            return SYSTEMS.get(value, value)
+            return scanner.SYSTEM_LABELS.get(value, value)
         # QML numeric properties can't distinguish null from measured zero.
         return -1.0 if value is None else value
 
@@ -179,12 +194,14 @@ class Bridge(QObject):
     changed = Signal()
     statusChanged = Signal()
     operationChanged = Signal()
+    spaceChanged = Signal()
     sceneChanged = Signal(bool)  # reset selection on navigation, not toggles
     quitRequested = Signal()
     feedback = Signal(str, bool, bool)
     _finished = Signal(object, object)
     _progress = Signal(str)
     _item = Signal(object)
+    _space = Signal(object)  # bytes may exceed Qt's signed 32-bit int
     queueChanged = Signal()
 
     def __init__(self, root: Path | None):
@@ -193,8 +210,11 @@ class Bridge(QObject):
         last = self.prefs.value('library', '', type=str)
         self.root = root if root is not None else Path(last) if last else None
         self.candidates = []
-        self.enabled_systems = set(SYSTEMS)
-        self.recommended = set(SYSTEMS)
+        self.enabled_systems = set(scanner.SYSTEM_LABELS)
+        self.recommended = set(scanner.SYSTEM_LABELS)
+        self.psp_manually_toggled = False
+        saved_format = self.prefs.value('pspFormat', 'chd', type=str)
+        self.psp_format = saved_format if saved_format in PSP_FORMATS else 'chd'
         self.pi = self.recalbox = False
         policy = self.prefs.value('cleanupPolicy', 'quarantine', type=str)
         self.policy = policy if policy in POLICIES else 'quarantine'
@@ -202,6 +222,7 @@ class Bridge(QObject):
         self.rumble = self.prefs.value('rumble', True, type=bool)
         self.preset = 'balanced'
         self.backend = None
+        self._free = None
         self.snap = None
         self.history = []
         self.omitted = set()
@@ -235,6 +256,7 @@ class Bridge(QObject):
         self._finished.connect(self._complete, Qt.ConnectionType.QueuedConnection)
         self._progress.connect(self._report)
         self._item.connect(self._queue.update_item, Qt.ConnectionType.QueuedConnection)
+        self._space.connect(self._set_space, Qt.ConnectionType.QueuedConnection)
 
     @Property(QObject, constant=True)
     def queueModel(self): return self._queue
@@ -293,8 +315,14 @@ class Bridge(QObject):
     @Property(str, notify=operationChanged)
     def operation(self): return self._busy
 
-    @Property(str, notify=changed)
-    def space(self): return size(self.snap['free']) if self.snap is not None else '—'
+    @Property(str, notify=spaceChanged)
+    def space(self): return size(self._free) if self._free is not None else '—'
+
+    @Slot(object)
+    def _set_space(self, free):
+        if self._free != free:
+            self._free = free
+            self.spaceChanged.emit()
 
     @Property(str, notify=changed)
     def savings(self): return size(self.saved) if self.saved is not None else '—'
@@ -307,6 +335,8 @@ class Bridge(QObject):
         def ready(data):
             self.candidates, self.recommended, default, self.recalbox, self.pi = data
             self.enabled_systems = set(self.recommended)
+            if self.psp_format == 'cso':
+                self.enabled_systems.add('psp')
             preset = self.prefs.value('preset', default, type=str)
             self.preset = preset if preset in PRESETS else default
             root = self.root or next(iter(self.candidates), None)
@@ -333,6 +363,7 @@ class Bridge(QObject):
                 self._install_scan(snapshot)
             else:
                 self.snap, self.history = None, []
+                self._set_space(None)
             self._draw(False)
             show_result(warning)
         self._work('Refreshing library', refresh, finished)
@@ -417,6 +448,7 @@ class Bridge(QObject):
 
     def _install_scan(self, result):
         self.snap, self.history = result
+        self._set_space(self.snap['free'])
         self.omitted.intersection_update(str(g['path']) for g in self.snap['games'])
 
     def _scan(self):
@@ -428,37 +460,55 @@ class Bridge(QObject):
             self._draw(True)
         self._work('Scanning library', lambda: _snapshot(self.backend), scanned)
 
+    def _completed(self, game):
+        mode = 'cso' if game['system'] == 'psp' and self.psp_format == 'cso' else game.get('mode')
+        return mode in game.get('verified_modes', ())
+
+    def _eligible(self):
+        return {str(g['path']) for g in (self.snap or {}).get('games', ())
+                if g['system'] in self.enabled_systems and not self._completed(g)}
+
     def _selected(self):
-        return {str(g['path']) for g in (self.snap or {}).get('games', [])
-                if g['system'] in self.enabled_systems and str(g['path']) not in self.omitted}
+        return self._eligible() - self.omitted
 
     def _draw(self, reset):
         snap = self.snap or {'games': [], 'playlists': [], 'issues': [], 'chds': [], 'verified': []}
         rows = []
-        selected = self._selected()
+        eligible = self._eligible()
+        selected = eligible - self.omitted
         primary = 'Start batch' if selected else 'Scan library'
-        self._summary = f'{len(selected)} selected'
+        self._summary = f'{len(selected)} of {len(eligible)} selected'
         if self.tab == 0:
-            self._subtitle = 'Review source discs before compression.'
+            self._subtitle = 'Review sources and their output formats before conversion.'
             if self.backend is None:
                 primary = 'Choose folder'
                 rows.append(row('library', 'Choose a ROM library', 'Select the folder that contains psx, dreamcast, or other system folders.'))
             else:
                 rows.append(row('filter', self.filter, 'Change library view', 'View'))
                 if self.filter == 'Queue':
+                    if eligible:
+                        all_selected = selected == eligible
+                        rows.append(row('bulk', 'Clear selection' if all_selected else 'Select all eligible games',
+                                        'Applies to enabled systems. Select individual games below.'))
                     for g in snap['games']:
                         path = str(g['path'])
-                        flag = 'System off' if g['system'] not in self.enabled_systems else ('Selected' if path in selected else 'Skipped')
-                        rows.append(row('game', Path(path).name, f"{SYSTEMS.get(g['system'], g['system'])}  ·  {size(g['size'])}", flag, path))
+                        flag = ('Already verified' if self._completed(g) else
+                                'System off' if g['system'] not in self.enabled_systems else
+                                'Selected' if path in selected else 'Skipped')
+                        system = g['system']
+                        output = _output_label(system, Path(path).suffix.lower(), self.psp_format)
+                        rows.append(row('game', Path(path).name, f"{scanner.SYSTEM_LABELS[system]} → {output}  ·  {size(g['size'])}", flag, path))
                     if not snap['games']:
-                        rows.append(row('scan', 'No ready sources', 'Add supported discs, then scan again.', 'Rescan'))
-                elif self.filter == 'CHD files':
-                    verified = set(map(str, snap.get('verified', [])))
-                    for chd in snap['chds']:
-                        path = str(chd)
-                        rows.append(row('chd', Path(path).name, 'RetroAchievements Hash Safe' if path in verified else 'Verification not recorded by CouchCHD', 'Inspect', path))
-                    if not snap['chds']:
-                        rows.append(row('scan', 'No CHD files found', 'Verified conversions will appear here.', 'Rescan'))
+                        rows.append(row('scan', 'No ready sources', 'Add supported images or cartridge ROMs, then scan again.', 'Rescan'))
+                elif self.filter == 'Output files':
+                    verified = set(map(str, snap['verified']))
+                    paths = sorted(verified.union(map(str, snap['chds'])))
+                    for path in paths:
+                        key = 'chd' if Path(path).suffix.casefold() == '.chd' else 'info'
+                        detail = 'Verified by CouchCHD' if path in verified else 'Verification not recorded by CouchCHD'
+                        rows.append(row(key, Path(path).name, detail, 'Inspect', path))
+                    if not paths:
+                        rows.append(row('scan', 'No output files found', 'Verified conversions will appear here.', 'Rescan'))
                 else:
                     for issue in snap['issues']:
                         category = str(issue['category']).casefold()
@@ -470,18 +520,25 @@ class Bridge(QObject):
                 rows.append(row('scan', 'Scan library again', str(self.root)))
         elif self.tab == 1:
             self._subtitle = 'Choose which systems to include in local and cloud batches.'
-            for key, name in SYSTEMS.items():
-                detail = {'psx': 'CD · CUE / ISO', 'segacd': 'CD · CUE', 'saturn': 'CD · CUE', 'dreamcast': 'CD · GDI / CUE', 'ps2': 'DVD / CD · ISO / CUE', 'psp': 'UMD · ISO'}[key]
+            for key, name in scanner.SYSTEM_LABELS.items():
+                extensions = sorted(scanner.FORMATS[key])
+                inputs = ' / '.join(ext[1:].upper() for ext in extensions)
+                output = _output_label(key, extensions[0], self.psp_format)
+                detail = f'{inputs} → {output}'
                 if self.pi and key == 'ps2': detail += '  ·  Not recommended on Pi 4'
-                if key == 'psp' and key not in self.recommended: detail = 'PPSSPP 1.17 or newer is required for PSP CHD playback.'
+                if key == 'psp' and self.psp_format == 'chd' and key not in self.recommended:
+                    detail += '  ·  Needs PPSSPP 1.17+; choose CSO in Settings for older versions.'
+                if key in ('xbox', '3ds'):
+                    detail += '  ·  Original always kept'
                 rows.append(row('system', name, detail, 'On' if key in self.enabled_systems else 'Off', key))
         elif self.tab == 2:
-            self._subtitle = 'Multi-disc titles share one portable playlist. Single discs stay separate.'
+            self._subtitle = 'PlayStation, Sega CD, Saturn and Dreamcast CHD sets can share a playlist.'
             rows = [row('playlist', Path(p).name, str(p), 'Inspect', p) for p in snap['playlists']]
             if not rows:
-                rows.append(row('scan', 'No playlists in this library', 'Convert a matching set of numbered discs to group them automatically.', 'Scan'))
+                rows.append(row('scan', 'No playlists in this library', 'Convert a complete numbered CHD set for one of the supported systems.', 'Scan'))
         elif self.tab == 3:
-            self._subtitle = 'Pull one game at a time. The remote originals stay in place.'
+            self._summary = f'{len(self.enabled_systems)} systems enabled'
+            self._subtitle = 'Ingest all eligible games in enabled systems. Remote originals stay in place.'
             primary = 'Start ingest' if self.ingest and self.backend else 'Choose source' if self.backend else 'Choose library'
             rows = [row('mount', 'Mounted folder', self.ingest or 'Browse a mounted NAS, SMB, NFS, or external drive.', 'Browse'),
                     row('remotes', 'Configured rclone remotes', 'Lists the remotes already configured on this device.', 'Refresh')]
@@ -494,7 +551,7 @@ class Bridge(QObject):
             self._subtitle = 'Restore originals or reclaim the space held by verified backups.'
             primary = 'Purge backups'
             rows = [row('undo', 'Undo last batch', 'Restore quarantined originals and reverse the most recent batch.'),
-                    row('purge', 'Purge verified backups', 'Permanently remove eligible quarantined originals.', 'Review')]
+                    row('purge', 'Purge verified backups', 'Test your games first. Removing backups cannot be undone.', 'Review')]
             for record in self.history:
                 rows.append(row('history', f"Batch {record['id']}", f"{_when(record['started'])}  ·  {record['operations']} operations", record['status'], record['id']))
         if self._queue_result and self.tab == (3 if self._queue_cloud else 0):
@@ -549,6 +606,7 @@ class Bridge(QObject):
     def _settings(self, reset=True):
         self._show('settings', 'Settings', 'Preferences apply to the next batch.', [
             row('library', 'ROM library', self.location, 'Change'), row('presets', 'Thermal profile', PRESETS[self.preset], 'Choose'),
+            row('psp_formats', 'PSP output format', 'For PSP ISO files only.', self.psp_format.upper()),
             row('policy', 'After verification', POLICIES[self.policy][1], POLICIES[self.policy][0]),
             row('sound', 'Interface sounds', 'Quiet navigation ticks and batch feedback.', 'On' if self.sound else 'Off'),
             row('rumble', 'Controller vibration', 'Pulse on completion or when attention is needed.', 'On' if self.rumble else 'Off'),
@@ -602,8 +660,13 @@ class Bridge(QObject):
         if cloud and not self.ingest: return self._pick('mount')
         sources = None if cloud else self._selected()
         if sources == set(): return self._scan()
-        details = f'From {self.ingest} to {self.root}. Remote originals stay untouched.' if cloud else f'{len(sources)} selected source discs in {self.root}. '
-        if not cloud: details += POLICIES[self.policy][1]
+        if cloud:
+            details = f'All eligible games in enabled systems, from {self.ingest} to {self.root}. Remote originals stay untouched.'
+        else:
+            scope = 'All eligible games' if sources == self._eligible() else 'Selected games'
+            details = f'{scope} in enabled systems: {len(sources)}.\n{self.root}\n{POLICIES[self.policy][1]}'
+            if self.policy != 'keep' and any(g['system'] in ('xbox', '3ds') and g['path'] in sources for g in self.snap['games']):
+                details += ' Original Xbox and 3DS images always stay in place.'
         if self.recalbox: details += '\nStop EmulationStation first. Its cached gamelist can overwrite playlist metadata.'
         self._ask('Start cloud ingest?' if cloud else 'Start verified compression?', details, 'Start ingest' if cloud else 'Start batch', lambda: self._run(cloud, sources))
 
@@ -618,9 +681,9 @@ class Bridge(QObject):
         self._queue_visible = True
         self.queueChanged.emit()
         options = dict(systems=set(self.enabled_systems), sources=sources, ingest=self.ingest if cloud else None,
-                       preset=self.preset, quarantine=cloud or self.policy != 'keep',
+                       preset=self.preset, psp_format=self.psp_format, quarantine=cloud or self.policy != 'keep',
                        immediate=not cloud and self.policy == 'immediate', progress=self._progress.emit,
-                       on_item=self._item.emit, cancel=self._cancel)
+                       on_item=self._item.emit, on_space=self._space.emit, cancel=self._cancel)
         def finished(result):
             self.saved = int(result['saved'])
             self.prefs.setValue(self._saved_key(), str(self.saved))
@@ -634,36 +697,51 @@ class Bridge(QObject):
                                        paused or ('Cancelled before completion.' if cancelled else 'Not processed in this batch.'))
             self.queueChanged.emit()
             text = f'{len(converted)} converted. Compression difference: {size(self.saved)}.'
+            if converted and not cloud and self.policy == 'quarantine':
+                text += '\nTest your games before permanently removing backups in History.'
             if paused:
                 text += f'\n{paused}'
                 if not cancelled: text += '\nResolve the condition, then start another batch to continue.'
             if errors: text += f'\n{len(errors)} errors. See the messages below.'
             def refreshed(warning):
-                self._report(text)
-                lines = list(errors)
+                result_text = self._with_free_space(text, result.get('free_before'))
+                self._report(result_text)
+                lines = errors + list(result.get('messages', ()))
                 if warning: lines.append(warning)
-                if converted and (self.snap or {}).get('playlists'):
-                    lines.append('If your Steam shortcuts pointed to disc 1, run Steam ROM Manager again to pick up the playlists.')
-                self._notice(title, text, lines)
+                self._notice(title, result_text, lines)
                 self.cue('alert' if errors or paused or warning else 'done')
             self._refresh_after_commit(refreshed)
         self._work('Compressing discs', lambda: self.backend.run(**options), finished)
 
+    def _with_free_space(self, message, before):
+        if self.snap is None or before is None:
+            return message
+        after = self.snap['free']
+        delta = after - before
+        direction = 'more' if delta >= 0 else 'less'
+        return f'{message}\nLibrary free now: {size(after)} ({size(abs(delta))} {direction} than before).'
+
     def _management(self, key):
         if self.backend is None: return self._pick('library')
         undo = key == 'undo'
-        text = ('Restore the most recent batch from quarantine and reverse its playlist changes.' if undo else 'This permanently removes eligible verified backups. Originals that are purged cannot be restored with Undo.')
+        text = ('Restore the most recent batch from its backup and reverse its playlist changes.' if undo else
+                'Test your converted games first. Removing verified backups frees the space they use, '
+                'but you cannot Undo after permanent removal.')
         if undo and self.recalbox: text += ' Stop EmulationStation first to protect gamelist changes.'
         def execute():
             self._hide()
-            def done(count):
+            def change():
+                before = hardware.free_bytes(self.root)
+                return (self.backend.undo() if undo else self.backend.purge()), before
+            def done(result):
+                count, before = result
                 msg = f'{count} operations reversed.' if undo else f'{count} backups purged.'
                 def refreshed(warning):
-                    self._report(msg)
-                    self._notice('Undo complete' if undo else 'Purge complete', msg, [warning] if warning else [])
+                    result_text = self._with_free_space(msg, before)
+                    self._report(result_text)
+                    self._notice('Undo complete' if undo else 'Purge complete', result_text, [warning] if warning else [])
                 self._refresh_after_commit(refreshed)
-            self._work('Restoring originals' if undo else 'Purging verified backups',
-                       self.backend.undo if undo else self.backend.purge, done)
+            self._work('Restoring originals' if undo else 'Purging verified backups', change, done)
         self._ask('Undo last batch?' if undo else 'Purge verified backups?', text, 'Restore originals' if undo else 'Permanently purge backups', execute)
 
     @Slot()
@@ -689,7 +767,7 @@ class Bridge(QObject):
             return
         if kind == 'confirm': return self._hide()
         if self._busy: return
-        if kind in ('presets', 'policies'): return self._settings()
+        if kind in ('presets', 'policies', 'psp_formats'): return self._settings()
         if kind == 'browse':
             if self._directory_trail: return self._browse(self._directory_trail.pop(), remember=False)
             return self._pick(self._target, returning=True)
@@ -733,18 +811,27 @@ class Bridge(QObject):
             self._queue_visible = True
             self.queueChanged.emit()
             return
+        if key == 'bulk' and not inspect:
+            eligible = self._eligible()
+            if eligible.isdisjoint(self.omitted):
+                self.omitted.update(eligible)
+            else:
+                self.omitted.difference_update(eligible)
+            return self._draw(False)
         if key == 'game':
             game = next(g for g in self.snap['games'] if str(g['path']) == arg)
             if inspect:
                 return self._notice(Path(arg).name, f"{game['system']}  ·  {size(game['size'])}\n{arg}", [str(t) for t in game['tracks']])
+            if self._completed(game):
+                return self._notice('Already verified', 'This output already exists. Choose Output files in the library view to inspect it.')
             if game['system'] not in self.enabled_systems:
-                return self._notice('System disabled', 'Enable this system on the Systems tab before including this disc.')
+                return self._notice('System disabled', 'Enable this system on the Systems tab before selecting this game.')
             if arg in self.omitted: self.omitted.remove(arg)
             else: self.omitted.add(arg)
             return self._draw(False)
         if key == 'chd':
             self._extract_chd = Path(arg)
-            return self._show('chd', Path(arg).name, f"{item['detail']}\n{arg}", [row('extract', 'Extract back to a disc image', 'BIN/CUE for CDs; ISO for DVDs.'), row('back', 'Return')])
+            return self._show('chd', Path(arg).name, f"{item['detail']}\n{arg}", [row('extract', 'Extract CD to BIN/CUE', 'For CD or GD-ROM CHDs only.'), row('back', 'Return')])
         if key == 'extract': return self._pick('extract')
         if key == 'playlist':
             def playlist_lines():
@@ -758,7 +845,7 @@ class Bridge(QObject):
         if key == 'use_dir': return self._choose_dir()
         if key == 'scan': return self._scan()
         if key == 'filter':
-            choices = ['Queue', 'CHD files', 'Needs Unpacking', 'Other scan issues']
+            choices = ['Queue', 'Output files', 'Needs Unpacking', 'Other scan issues']
             return self._show('filter', 'Library views', 'Review eligible sources, existing images, or scanner findings.', [row('view', v, '', 'Current' if self.filter == v else '', v) for v in choices])
         if key == 'view':
             self.filter = arg
@@ -766,14 +853,30 @@ class Bridge(QObject):
             return self._draw(True)
         if key == 'system':
             self.enabled_systems.symmetric_difference_update([arg])
+            if arg == 'psp':
+                self.psp_manually_toggled = True
             return self._draw(False)
+        if key == 'psp_formats':
+            return self._show('psp_formats', 'PSP output format', 'Choose how PSP ISO files will be saved. Existing outputs are not changed.', [
+                row('psp_format', label, '', 'Current' if self.psp_format == value else '', value)
+                for value, label in PSP_FORMATS.items()])
+        if key == 'psp_format':
+            if self.psp_format != arg and 'psp' not in self.recommended and not self.psp_manually_toggled:
+                if arg == 'cso':
+                    self.enabled_systems.add('psp')
+                else:
+                    self.enabled_systems.discard('psp')
+            self.psp_format = arg
+            self.prefs.setValue('pspFormat', arg)
+            self._draw(False)
+            return self._settings()
         if key == 'presets': return self._show('presets', 'Thermal profile', 'Deck and Pi keep a device CPU limit, even when docked. Silent requests fewer workers.', [row('preset', label, '', 'Current' if self.preset == p else '', p) for p, label in PRESETS.items()])
         if key == 'preset':
             self.preset = arg
             self.prefs.setValue('preset', arg)
             return self._settings()
         if key == 'policy':
-            return self._show('policies', 'After verification', 'This applies only to local source discs. Cloud originals are never removed.', [
+            return self._show('policies', 'After verification', 'This applies only to eligible local inputs. Original Xbox, 3DS and cloud sources always stay in place.', [
                 row('set_policy', label, detail, 'Current' if self.policy == p else '', p)
                 for p, (label, detail) in POLICIES.items()])
         if key == 'set_policy':

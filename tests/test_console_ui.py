@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import sys
 import textwrap
+import time
 
 import pytest
 
@@ -51,6 +52,83 @@ def test_immediate_cleanup_requires_deliberate_second_choice(tmp_path, monkeypat
     assert app is QCoreApplication.instance()
 
 
+def test_controller_selection_to_verified_cso_and_measured_free_space(tmp_path, monkeypatch):
+    from test_cso import _iso
+
+    app = QCoreApplication.instance() or QCoreApplication([])
+    prefs = QSettings(str(tmp_path / 'preferences.ini'), QSettings.Format.IniFormat)
+    monkeypatch.setattr(bridge, '_settings', lambda: prefs)
+    root = tmp_path / 'roms'
+    psp = root / 'psp'
+    psp.mkdir(parents=True)
+    selected = psp / 'First.iso'
+    other = psp / 'Other.iso'
+    for path in (selected, other):
+        path.write_bytes(_iso())
+        os.utime(path, (1600000000, 1600000000))
+    nes = root / 'nes' / 'Cart.nes'
+    nes.parent.mkdir()
+    nes.write_bytes(b'NES\x1a' + bytes([1, 1]) + bytes(10 + 16384 + 8192))
+    os.utime(nes, (1600000000, 1600000000))
+    output = selected.with_suffix('.cso')
+    # Compression is positive but free space *falls* while the backup remains.
+    monkeypatch.setattr(bridge.hardware, 'free_bytes', lambda _: (4 if output.exists() else 5) * 1024**3)
+    state = bridge.Bridge(root)
+
+    def settle():
+        deadline = time.monotonic() + 12
+        while state.busy and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(.01)
+        assert not state.busy, state.status
+
+    def choose(key, arg=None):
+        rows = state.modalRows if state.modal['kind'] else state.rows
+        index = next(i for i, item in enumerate(rows) if item['key'] == key and (arg is None or item['arg'] == str(arg)))
+        state.activate(index, False)
+
+    try:
+        state._library(root)
+        settle()
+        state.settings()
+        choose('psp_formats')
+        assert next(row['arg'] for row in state.modalRows if row['value'] == 'Current') == 'chd'
+        choose('psp_format', 'cso')
+        state.back()
+        state.switchTab(1)
+        choose('system', 'nes')
+        state.switchTab(0)
+        assert state.summary == '2 of 2 selected'
+        choose('bulk')
+        assert state.summary == '0 of 2 selected'
+        choose('bulk')
+        assert state.summary == '2 of 2 selected'
+        choose('game', other)
+        assert state.summary == '1 of 2 selected'
+        state.primary()
+        assert 'back' in state.modal['body'].lower() and 'Undo' in state.modal['body']
+        choose('accept')
+        settle()
+        assert state.modal['title'] == 'Batch complete', state.modal
+        assert 'Compression difference:' in state.modal['body'] and '1.0 GiB less' in state.modal['body']
+        assert '4.0 GiB' in state.space and state.queueModel.verified == 1
+        assert output.read_bytes().startswith(b'CISO') and not selected.exists()
+        assert other.is_file() and nes.is_file()
+        state.back(); state.back()
+        choose('filter')
+        choose('view', 'Output files')
+        choose('info', output)
+        assert 'Verified by CouchCHD' in state.modal['body'] and 'RetroAchievements' not in state.modal['body']
+        assert not any(row['key'] == 'extract' for row in state.modalRows)
+    finally:
+        state.close()
+    reopened = bridge.Bridge(root)
+    try:
+        assert reopened.psp_format == 'cso'
+    finally:
+        reopened.close()
+
+
 def test_single_qml_window_handles_physical_actions(tmp_path):
     # QCoreApplication and QGuiApplication cannot share a process. Isolate Qt
     # platform selection and all user preferences from the workstation.
@@ -59,10 +137,11 @@ def test_single_qml_window_handles_physical_actions(tmp_path):
     script = '''
         import sys
         import ctypes
+        import os
         import pygame as pg
         from threading import Event
         from pathlib import Path
-        from PySide6.QtCore import QUrl
+        from PySide6.QtCore import QSettings, QUrl
         from PySide6.QtGui import QGuiApplication
         from PySide6.QtQml import QQmlApplicationEngine
         from PySide6.QtQuick import QQuickItem
@@ -72,6 +151,8 @@ def test_single_qml_window_handles_physical_actions(tmp_path):
 
         app = QGuiApplication([])
         engine = QQmlApplicationEngine()
+        prefs = QSettings(str(Path(os.environ['XDG_CONFIG_HOME']) / 'prefs.ini'), QSettings.Format.IniFormat)
+        bridge._settings = lambda: prefs
         state, pad = bridge.Bridge(None), InputRouter(app)
         engine.rootContext().setContextProperty('library', state)
         engine.rootContext().setContextProperty('router', pad)
@@ -139,6 +220,12 @@ def test_single_qml_window_handles_physical_actions(tmp_path):
         assert len(QGuiApplication.allWindows()) == 1
         pad.action.emit('back')
         assert state.modal['kind'] == 'settings'
+        index = next(i for i, r in enumerate(state.modalRows) if r['key'] == 'psp_formats')
+        for _ in range(index): pad.action.emit('down')
+        pad.action.emit('confirm')
+        assert state.modal['kind'] == 'psp_formats'
+        pad.action.emit('down'); pad.action.emit('confirm')
+        assert state.modal['kind'] == 'settings' and prefs.value('pspFormat') == 'cso'
         sdl.SDL_JoystickClose(stick)
         sdl.SDL_JoystickDetachVirtual(ident)
         pad.close()
