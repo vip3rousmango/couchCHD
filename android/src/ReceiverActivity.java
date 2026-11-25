@@ -301,6 +301,22 @@ public final class ReceiverActivity extends Activity {
         else if (peer != null) reset();
         else super.onBackPressed();
     }
+    @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        int key = event.getKeyCode();
+        if (actions != null && actions.getChildCount() > 0 &&
+                (key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT)) {
+            // Android can focus the full-height ScrollView instead of a button when
+            // a D-pad wakes a touch-mode screen. Horizontal keys belong to the action bar;
+            // leave vertical keys to Android for scrolling the status text.
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                int current = actions.indexOfChild(getCurrentFocus());
+                int next = current < 0 ? 0 : current + (key == KeyEvent.KEYCODE_DPAD_LEFT ? -1 : 1);
+                actions.getChildAt(Math.max(0, Math.min(actions.getChildCount()-1, next))).requestFocusFromTouch();
+            }
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
     @Override public boolean onKeyUp(int key, KeyEvent e) {
         // Android gamepads may send BUTTON_A rather than DPAD_CENTER / ENTER.
         if (key == KeyEvent.KEYCODE_BUTTON_A && getCurrentFocus() instanceof Button) return getCurrentFocus().performClick();
