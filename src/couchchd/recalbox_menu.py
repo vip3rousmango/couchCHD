@@ -7,6 +7,7 @@ from xml.parsers import expat
 from xml.sax.saxutils import quoteattr
 
 from .menu_entry import _ASSETS, read_regular, store_entry
+from .stock_art import upgrade_stock
 
 
 _UUID = '27790d47-96e4-43be-a995-8c2ca3e6ea0d'
@@ -114,6 +115,8 @@ def _cover(roms: Path) -> None:
         raise ValueError(f'Leaving existing media path unchanged: {dest}')
     if not dest.exists():
         store_entry(dest, (_ASSETS / 'grid.png').read_bytes(), None)
+    else:
+        upgrade_stock(dest, _ASSETS / 'grid.png')
 
 
 def _artwork(roms: Path, games: bytes | None) -> str:

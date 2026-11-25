@@ -221,6 +221,30 @@ def test_live_refresh_uses_recorded_id_and_never_edits_shortcuts(profile, monkey
     assert not (file.parents[3] / 'controller_base').exists()
 
 
+def test_refresh_replaces_only_recognized_stock_for_the_same_slot(profile, monkeypatch):
+    from hashlib import sha256
+    from couchchd import stock_art
+
+    launcher, file, appid = profile
+    previous = b'old portrait'
+    monkeypatch.setitem(stock_art._PREVIOUS, 'grid', (len(previous), sha256(previous).hexdigest()))
+    grid = file.parent / 'grid'
+    grid.mkdir()
+    portrait = grid / f'{appid}p.png'
+    portrait.write_bytes(previous)
+    alternate = grid / f'{appid}p.jpg'
+    alternate.write_bytes(b'preferred portrait')
+    steam.refresh_artwork(launcher)
+    assert portrait.read_bytes() == previous and alternate.read_bytes() == b'preferred portrait'
+    alternate.unlink()
+    portrait.write_bytes(b'my! portrait')  # Same byte length; not CouchCHD artwork.
+    steam.refresh_artwork(launcher)
+    assert portrait.read_bytes() == b'my! portrait'
+    portrait.write_bytes(previous)
+    steam.refresh_artwork(launcher)
+    assert portrait.read_bytes() == (steam.ASSETS / 'grid.png').read_bytes()
+
+
 @pytest.mark.parametrize('conflict', ['wrong-game', 'wrong-app', 'other-installation', 'other-account',
                                       'duplicate', 'unregistered', 'malformed', 'linked-grid'])
 def test_live_refresh_fails_closed(profile, monkeypatch, conflict):

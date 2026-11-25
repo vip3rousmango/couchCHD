@@ -1,9 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <title>CouchCHD — optical disc</title>
-  <circle cx="128" cy="128" r="122" fill="#192221" stroke="#85928a" stroke-width="3"/>
-  <g fill="none" stroke="#dbf483">
-    <path d="M218 166a98 98 0 1 1 0-76" stroke-width="25"/>
-    <path d="M188 153a65 65 0 1 1 0-50" stroke-width="11"/>
-    <circle cx="128" cy="128" r="17" stroke-width="8"/>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="256" height="256" viewBox="0 0 256 256">
+  <title>CouchCHD — prism disc</title>
+  <!-- Broad reflections and a contrasting spindle, drawn for a 16 px shelf slot. -->
+  <circle cx="128" cy="131" r="120" fill="#20182F"/>
+  <circle cx="128" cy="133" r="115" fill="#8159AA"/>
+  <g transform="translate(128 122)">
+    <circle r="114" fill="#DFFF72" stroke="#20182F" stroke-width="5"/>
+    <path d="M0 0L-108.62 -31.15A113 113 0 0 1 -58.2 -96.86Z" fill="#247D81"/>
+    <path d="M0 0L-58.2 -96.86A113 113 0 0 1 -9.85 -112.57Z" fill="#54D5AC"/>
+    <path d="M0 0L19.62 -111.28A113 113 0 0 1 68.01 -90.25Z" fill="#FFF1CF"/>
+    <path d="M0 0L108.62 31.15A113 113 0 0 1 45.96 103.23Z" fill="#FF795B"/>
+    <path d="M0 0L45.96 103.23A113 113 0 0 1 1.97 112.98Z" fill="#EB5797"/>
+    <path d="M0 0L1.97 112.98A113 113 0 0 1 -44.15 104.02Z" fill="#8159AA"/>
+    <path d="M-92.28 -26.46A96 96 0 0 1 56.43 -77.67" fill="none" stroke="#FFF1CF" stroke-width="5"/>
+    <circle r="35" fill="#20182F"/>
+    <circle r="14" fill="#FFF1CF"/>
   </g>
 </svg>

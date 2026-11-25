@@ -303,3 +303,25 @@ def test_real_chdman_audio_roundtrip_if_installed(tmp_path, portable):
                       cancel=threading.Event(), fast_cd=portable)
     restored = converter.extract(target, tmp_path/'restored', tool)
     assert restored.with_suffix('.bin').read_bytes() == payload
+
+
+def test_portable_mixed_mode_cd_keeps_data_audio_and_track_boundary(tmp_path):
+    try:
+        tool = converter.tool_path()
+    except FileNotFoundError:
+        pytest.skip('Install or bundle chdman for a real codec round trip')
+    # Distinct patterns make a dropped, padded or byte-swapped audio sector observable.
+    # 77 data sectors is deliberately not aligned to a four-frame CHD track boundary.
+    data = b''.join(bytes([i]) * 2352 for i in range(77))
+    audio = bytes(range(16)) * (147 * 61)
+    aged(tmp_path / 'data.bin', data)
+    aged(tmp_path / 'music.bin', audio)
+    cue = aged(tmp_path / 'mixed.cue', b'FILE "data.bin" BINARY\nTRACK 01 MODE1/2352\nINDEX 01 00:00:00\n'
+               b'FILE "music.bin" BINARY\nTRACK 02 AUDIO\nINDEX 01 00:00:00\n')
+    chd = tmp_path / 'mixed.chd'
+    converter.convert(scanner.inspect(cue, 'segacd'), chd, tool, threads=1,
+                      cancel=threading.Event(), fast_cd=True)
+    restored = converter.extract(chd, tmp_path / 'restore', tool)
+    disc = scanner.inspect(restored, 'segacd', fresh=False)
+    assert disc.frames == (77, 61)
+    assert b''.join(track.read_bytes() for track in disc.files if track != disc.source) == data + audio

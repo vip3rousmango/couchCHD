@@ -1,1 +1,59 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="620" viewBox="0 0 1920 620"><rect width="1920" height="620" fill="#192221"/><g fill="none" stroke="#dbf483"><path d="M1900 475a390 390 0 1 1 0-330" stroke-width="46"/><path d="M1800 432a281 281 0 1 1 0-244" stroke-width="16"/><path d="M1730 401a206 206 0 1 1 0-182" stroke-width="3"/><circle cx="1545" cy="310" r="52" stroke-width="12"/></g><g font-family="sans-serif" fill="#f1f1e9"><text x="123" y="334" font-size="143" font-weight="bold" letter-spacing="-8">CouchCHD</text><text x="132" y="420" font-size="45">Disc library utility</text></g><path d="M132 483h705" stroke="#6a7872" stroke-width="2"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1920" height="620" viewBox="0 0 1920 620">
+  <title>CouchCHD — diffracted light</title>
+  <!-- Keep the left side free for the Steam title and library controls. -->
+  <rect width="1920" height="620" fill="#20182F"/>
+  <path fill="#291E3C" d="M650 620Q883 620 1039 454L1325 148Q1422 45 1528 0H1920V620Z"/>
+  <path fill="#4C305F" d="M864 620Q974 579 1068 479L1353 174Q1474 45 1622 0H1693Q1504 41 1370 187L1084 492Q1003 579 908 620Z"/>
+  <path fill="none" stroke="#8159AA" stroke-width="2" d="M982 623Q1047 584 1111 517L1398 209Q1526 70 1729 20"/>
+  <g transform="translate(1487 279) scale(2.28)">
+    <!-- Offset colour separations follow the disc's flight. -->
+    <path d="M-510 244C-350 244-290 230-247 176L-193 112Q-165 77-113 77H-46Q12 77 67 13L104-30" fill="none" stroke="#20182F" stroke-width="85"/>
+    <g fill="none" stroke-width="17">
+      <path d="M-510 217C-355 217-297 205-259 158L-205 94Q-171 51-113 51H-46Q-1 51 48-8L84-51" stroke="#FF795B"/>
+      <path d="M-510 237C-350 237-290 225-246 172L-192 108Q-162 71-113 71H-46Q7 71 62 7L99-37" stroke="#EB5797"/>
+      <path d="M-510 257C-343 257-281 242-232 185L-178 121Q-153 91-113 91H-46Q20 91 78 21L115-22" stroke="#8159AA"/>
+    </g>
+    <g transform="rotate(-22) scale(1 .77)">
+      <!-- Edge and reflective face, in the disc's own plane. -->
+      <circle cy="8" r="154" fill="#20182F"/>
+      <circle cy="6" r="151" fill="#8159AA"/>
+      <circle r="152" fill="#FFF1CF" stroke="#20182F" stroke-width="2"/>
+      <circle r="149" fill="#54D5AC"/>
+      <path fill="#247D81" d="M0 0L-148.18 -15.57A149 149 0 0 1 -123.53 -83.32Z"/>
+      <path fill="#20182F" d="M0 0L-123.53 -83.32A149 149 0 0 1 -72.24 -130.32Z"/>
+      <path fill="#4C305F" d="M0 0L-72.24 -130.32A149 149 0 0 1 -55.82 -138.15Z"/>
+      <path fill="#8159AA" d="M0 0L-55.82 -138.15A149 149 0 0 1 -28.43 -146.26Z"/>
+      <path fill="#EB5797" d="M0 0L-28.43 -146.26A149 149 0 0 1 2.6 -148.98Z"/>
+      <path fill="#FF795B" d="M0 0L2.6 -148.98A149 149 0 0 1 55.82 -138.15Z"/>
+      <path fill="#FFF1CF" d="M0 0L55.82 -138.15A149 149 0 0 1 69.95 -131.56Z"/>
+      <path fill="#DFFF72" d="M0 0L69.95 -131.56A149 149 0 0 1 115.79 -93.77Z"/>
+      <path fill="#FFF1CF" d="M0 0L115.79 -93.77A149 149 0 0 1 132.76 -67.64Z"/>
+      <path fill="#DFFF72" d="M0 0L132.76 -67.64A149 149 0 0 1 136.12 -60.6Z"/>
+      <path fill="#247D81" d="M0 0L136.12 -60.6A149 149 0 0 1 148.18 15.57Z"/>
+      <path fill="#8159AA" d="M0 0L148.18 15.57A149 149 0 0 1 140.88 48.51Z"/>
+      <path fill="#4C305F" d="M0 0L140.88 48.51A149 149 0 0 1 103.5 107.18Z"/>
+      <path fill="#EB5797" d="M0 0L103.5 107.18A149 149 0 0 1 83.32 123.53Z"/>
+      <path fill="#FF795B" d="M0 0L83.32 123.53A149 149 0 0 1 38.56 143.92Z"/>
+      <path fill="#FFF1CF" d="M0 0L38.56 143.92A149 149 0 0 1 15.57 148.18Z"/>
+      <path fill="#DFFF72" d="M0 0L15.57 148.18A149 149 0 0 1 -55.82 138.15Z"/>
+      <path fill="#FFF1CF" d="M0 0L-55.82 138.15A149 149 0 0 1 -72.24 130.32Z"/>
+      <path fill="#DFFF72" d="M0 0L-72.24 130.32A149 149 0 0 1 -89.67 119Z"/>
+      <g fill="none">
+        <circle r="143" stroke="#20182F" stroke-width="1.1"/>
+        <circle r="139" stroke="#FFF1CF" stroke-width=".9"/>
+        <path stroke="#FFF1CF" stroke-width="1.8" d="M-130.28 -13.69A131 131 0 0 1 -33.91 -126.54 M96.86 -58.2A113 113 0 0 1 59.88 95.83"/>
+        <path stroke="#20182F" stroke-width="1.3" d="M26.4 98.52A102 102 0 0 1 -95.85 34.89 M26.74 93.24A97 97 0 0 1 -91.15 33.18 M-113.9 -43.72A122 122 0 0 1 -37.7 -116.03"/>
+        <circle r="44" stroke="#20182F" stroke-width="2"/>
+      </g>
+      <!-- The pale spindle window is ringed with unrecorded lead-in. -->
+      <circle r="39" fill="#FFF1CF" stroke="#20182F" stroke-width="4"/>
+      <circle r="32" fill="#8159AA"/>
+      <path d="M0 0L13.52 29A32 32 0 0 1 -32 0Z" fill="#EB5797"/>
+      <circle r="19" fill="#20182F"/>
+      <circle r="12" fill="#DFFF72"/>
+    </g>
+    <path transform="translate(97 -102) scale(0.85)" fill="#FFF1CF" d="M0-18L3-4L15 0L3 3L0 18L-3 4L-14 0L-3-3Z"/>
+    <path transform="translate(117 -116) scale(0.32)" fill="#DFFF72" d="M0-18L3-4L15 0L3 3L0 18L-3 4L-14 0L-3-3Z"/>
+    <path transform="translate(-121 92) scale(0.62)" fill="#FFF1CF" d="M0-18L3-4L15 0L3 3L0 18L-3 4L-14 0L-3-3Z"/>
+  </g>
+</svg>

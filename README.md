@@ -12,9 +12,11 @@ curl -f https://vip3rousmango.github.io/couchCHD/i | sh
 
 This runs code from this repository as your current user. To inspect it first, download the script to a file, read it, then run `sh install-device.sh`. Don't use `sudo` on the Deck. No build machine, clone, Python installation, or GitHub login is required on the target.
 
-The installer selects the x86-64 AppImage or aarch64 Linux tarball from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.7), verifies its SHA-256 against that release's manifest, and runs `--version` before activating it. It stops on a missing release, failed download or checksum mismatch. Both architectures require a **64-bit userspace, glibc 2.36+**, an executable data volume, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported by these binaries.
+The installer selects the x86-64 AppImage or aarch64 Linux tarball from the pinned [GitHub testing release](https://github.com/vip3rousmango/couchCHD/releases/tag/v0.1.0-preview.8), verifies its SHA-256 against that release's manifest, and runs `--version` before activating it. It stops on a missing release, failed download or checksum mismatch. Both architectures require a **64-bit userspace, glibc 2.36+**, an executable data volume, and compatible graphics/input drivers for the UI. A Pi 4 running a 32-bit image is not supported by these binaries.
 
 Desktop Linux gets an Applications menu entry and launches immediately if a graphical display is available. On appliances the installer registers the launcher, tells you how to refresh the menu, and leaves the current frontend running. Setup does not convert or purge anything.
+
+**Pi 4 / Recalbox over SSH:** connect from your desktop using your normal Recalbox SSH login, then run the public install command above **at the Pi prompt**. Setup installs under `/recalbox/share/system/couchchd`, not on the SSH client. Restart Recalbox when convenient and open **Ports → CouchCHD** on the TV. If Ports is hidden, enable **Show Ports System**.
 
 **Steam Deck / Gaming Mode:** In Desktop Mode, choose **Steam → Exit** (closing the window is not enough), then run the installer above. Setup registers the persistent `run-couchchd` launcher for your signed-in native Steam account. Return to Gaming Mode and choose **Library → Non-Steam → CouchCHD → Play**. You don't need to manually add the AppImage or desktop file. If you already did, leave the shortcut in place during setup.
 
@@ -24,7 +26,7 @@ Desktop Linux gets an Applications menu entry and launches immediately if a grap
 
 **Update from the couch:** after installing preview.4 or later with the public installer, open **Settings → Update CouchCHD** when idle. One press checks the project's release channel and installs a newer verified build if available. Exit and reopen CouchCHD normally to use it; the updater doesn't restart Steam, change menu entries, or touch your ROM library. If you're on preview.3 or earlier, finish or cancel your batch, exit CouchCHD, then run the short install command once to get this option. Private and source installations stay on their existing update path.
 
-On the next managed launch, CouchCHD fills missing Steam portraits, landscape tiles, heroes, logos and icons for its existing shortcut without overwriting custom art. Restart Steam if it still shows a cached image. For a preview.4 shortcut with no icon configured, fully exit Steam and use **Settings → Add to Steam** once in Desktop Mode. **Settings → Refresh launcher artwork** reports what can be refreshed without editing a running frontend.
+On the next managed launch, CouchCHD fills missing Steam artwork and updates PNGs it recognizes as the stock preview.6/.7 artwork. Custom images and unrecognized older covers stay untouched. Recalbox reuses the portrait; the Linux desktop menu references a persistent icon file directly, without a theme-cache lookup. **Settings → Refresh launcher artwork** reports the result. Reopen the application menu or restart Steam if an old image is still cached. For a preview.4 Steam shortcut without an assigned icon, fully exit Steam and use **Settings → Add to Steam** once in Desktop Mode.
 
 | Detected frontend | Where to launch CouchCHD |
 | --- | --- |

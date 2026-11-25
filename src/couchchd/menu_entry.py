@@ -1,4 +1,5 @@
 """Publish native frontend entries without overwriting user customizations."""
+import hashlib
 import os
 import shlex
 import stat
@@ -10,6 +11,7 @@ from .ledger import install_new
 
 _ASSETS = Path(__file__).parent / 'ui/assets'
 _DESKTOP_ID = 'io.github.vip3rousmango.CouchCHD'
+_PREVIEW7_SVG_SHA256 = 'df3bd1f1509f861da75dc4f13dc460a2bab14e7cfca9f7779cf7a08e22874c47'
 _HOME_ROOT = Path('/home')
 
 
@@ -45,12 +47,13 @@ def store_entry(path: Path, data: bytes, old: bytes | None, mode: int = 0o600) -
         with os.fdopen(fd, 'wb') as f:
             f.write(data)
             f.flush()
-            if old is not None:
+            if os.name == 'posix' and old is not None:
                 info, staged = path.lstat(), os.fstat(f.fileno())
                 if (info.st_uid, info.st_gid) != (staged.st_uid, staged.st_gid):
                     os.fchown(f.fileno(), info.st_uid, info.st_gid)
                 mode = stat.S_IMODE(info.st_mode)
-            os.fchmod(f.fileno(), mode)
+            if os.name == 'posix':
+                os.fchmod(f.fileno(), mode)
             os.fsync(f.fileno())
         if old is None:
             install_new(tmp, path)
@@ -94,7 +97,10 @@ def _desktop(launcher: Path, *, install: bool) -> tuple[Path, str]:
     arg = arg.replace('\\', '\\\\').replace('%', '%%')
     data = host_home_path(Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share'))
     path = data / 'applications' / f'{_DESKTOP_ID}.desktop'
-    icon = data / 'icons/hicolor/scalable/apps' / f'{_DESKTOP_ID}.svg'
+    legacy = data / 'icons/hicolor/scalable/apps' / f'{_DESKTOP_ID}.svg'
+    raster = data / 'couchchd/artwork/icon.png'
+    if any(ord(c) < 32 for c in str(data)):
+        raise ValueError('Desktop icon path contains a control character')
     _check_path(path)
     previous = read_regular(path)
     if previous is None and not install:
@@ -105,21 +111,34 @@ def _desktop(launcher: Path, *, install: bool) -> tuple[Path, str]:
                 f'Exec="{arg}"\nIcon={icon_name}\nTerminal=false\nCategories={categories}\n').encode()
 
     # Do not parse/reserialize, or migrate a different installation's launcher.
-    current = entry(_DESKTOP_ID, 'Utility;Compression;')
-    if previous not in (None, current, entry(_DESKTOP_ID, 'Game;Utility;'), entry('applications-games', 'Game;Utility;')):
+    categories = 'Utility;Compression;'
+    # Icon is a desktop string, not an Exec argument: literal spaces and %,
+    # doubled backslashes, no shell quoting.
+    raster_entry = entry(str(raster).replace('\\', '\\\\'), categories)
+    legacy_entry = entry(str(legacy).replace('\\', '\\\\'), categories)
+    if previous not in (None, raster_entry, legacy_entry, entry(_DESKTOP_ID, categories),
+                        entry(_DESKTOP_ID, 'Game;Utility;'), entry('applications-games', 'Game;Utility;')):
         return path, 'Customized desktop entry kept; no artwork changed.'
-    _check_path(icon)
-    added = not icon.exists()
-    if added:
-        icon.parent.mkdir(parents=True, exist_ok=True)
-        store_entry(icon, (_ASSETS / 'icon.svg').read_bytes(), None, 0o644)
-    elif not icon.is_file():
-        raise ValueError(f'Leaving existing desktop icon unchanged: {icon}')
+
+    icon, current = raster, raster_entry
+    if previous != raster_entry:
+        _check_path(legacy)
+        old_svg = read_regular(legacy)
+        if old_svg is not None and hashlib.sha256(old_svg).hexdigest() != _PREVIEW7_SVG_SHA256:
+            icon, current = legacy, legacy_entry
+    added = False
+    if icon == raster:
+        _check_path(raster)
+        if not raster.exists():
+            raster.parent.mkdir(parents=True, exist_ok=True)
+            store_entry(raster, (_ASSETS / 'icon.png').read_bytes(), None, 0o644)
+            added = True
+        elif not raster.is_file():
+            raise ValueError(f'Leaving non-file desktop icon unchanged: {raster}')
     path.parent.mkdir(parents=True, exist_ok=True)
     store_entry(path, current, previous, 0o644)
-    if previous == current and not added:
-        return path, 'Desktop menu icon already present.'
-    return path, 'Desktop menu icon installed.' if added else 'Desktop menu now uses the existing icon.'
+    status = 'already present' if previous == current and not added else 'registered'
+    return path, f'Desktop menu icon {status}: {icon}'
 
 
 def install_desktop(launcher: Path) -> Path:

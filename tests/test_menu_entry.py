@@ -35,14 +35,22 @@ def test_does_not_publish_through_link(tmp_path):
 
 
 def test_desktop_entry_escapes_field_codes_and_quotes(tmp_path, monkeypatch):
-    monkeypatch.setenv('XDG_DATA_HOME', str(tmp_path))
+    data = tmp_path / r'my %u\data'
+    monkeypatch.setenv('XDG_DATA_HOME', str(data))
     launcher = tmp_path / 'a %u "folder"/run-couchchd'
     entry = install_desktop(launcher)
-    assert entry.parent == tmp_path / 'applications'
+    assert entry.parent == data / 'applications'
+    assert f'Icon={tmp_path}/' + r'my %u\\data/couchchd/artwork/icon.png' + '\n' in entry.read_text()
+    assert (data / 'couchchd/artwork/icon.png').read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
     assert r'%%u \\"folder\\"/run-couchchd"' in entry.read_text()
 
 
-def test_migrate_only_exact_managed_desktop_and_keep_replacement_icon(tmp_path, monkeypatch):
+@pytest.mark.parametrize(('old_icon', 'categories'), [
+    ('applications-games', 'Game;Utility;'),
+    ('io.github.vip3rousmango.CouchCHD', 'Game;Utility;'),
+    ('io.github.vip3rousmango.CouchCHD', 'Utility;Compression;'),
+])
+def test_migrate_only_exact_managed_desktop_and_keep_replacement_icon(tmp_path, monkeypatch, old_icon, categories):
     monkeypatch.setenv('XDG_DATA_HOME', str(tmp_path))
     launcher = tmp_path / 'My Apps/run-couchchd'
     assert 'No registered' in refresh_desktop_artwork(launcher)
@@ -51,22 +59,69 @@ def test_migrate_only_exact_managed_desktop_and_keep_replacement_icon(tmp_path, 
     entry = tmp_path / 'applications' / (name + '.desktop')
     entry.parent.mkdir()
     legacy = ('[Desktop Entry]\nType=Application\nName=CouchCHD\n'
-              f'Exec="{launcher}"\nIcon=applications-games\nTerminal=false\nCategories=Game;Utility;\n')
+              f'Exec="{launcher}"\nIcon={old_icon}\nTerminal=false\nCategories={categories}\n')
     entry.write_text(legacy)
     entry.chmod(0o640)
+    if old_icon == name:
+        svg = tmp_path / f'icons/hicolor/scalable/apps/{name}.svg'
+        svg.parent.mkdir(parents=True)
+        # Exact shipped preview.7 bytes, independent of current artwork.
+        svg.write_text('''<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>CouchCHD — optical disc</title>
+  <circle cx="128" cy="128" r="122" fill="#192221" stroke="#85928a" stroke-width="3"/>
+  <g fill="none" stroke="#dbf483">
+    <path d="M218 166a98 98 0 1 1 0-76" stroke-width="25"/>
+    <path d="M188 153a65 65 0 1 1 0-50" stroke-width="11"/>
+    <circle cx="128" cy="128" r="17" stroke-width="8"/>
+  </g>
+</svg>
+''', encoding='utf-8')
     refresh_desktop_artwork(launcher)
-    assert f'Icon={name}\n' in entry.read_text() and 'Categories=Utility;Compression;\n' in entry.read_text()
+    icon = tmp_path / 'couchchd/artwork/icon.png'
+    assert f'Icon={icon}\n' in entry.read_text() and 'Categories=Utility;Compression;\n' in entry.read_text()
     assert entry.stat().st_mode & 0o777 == 0o640
-    icon = tmp_path / f'icons/hicolor/scalable/apps/{name}.svg'
-    assert '<svg' in icon.read_text()
+    assert icon.read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
     icon.write_bytes(b'custom artwork')
-    refresh_desktop_artwork(launcher)
+    mtimes = (icon.stat().st_mtime_ns, entry.stat().st_mtime_ns)
+    assert str(icon) in refresh_desktop_artwork(launcher)
+    assert (icon.stat().st_mtime_ns, entry.stat().st_mtime_ns) == mtimes
     assert icon.read_bytes() == b'custom artwork'
     entry.write_text(legacy + 'Actions=custom;\n')
     icon.unlink()
     assert 'Customized' in refresh_desktop_artwork(launcher)
     assert install_desktop(launcher) == entry and not icon.exists()
     assert entry.read_text() == legacy + 'Actions=custom;\n'
+
+
+def test_custom_themed_icon_remains_selected_in_place(tmp_path, monkeypatch):
+    monkeypatch.setenv('XDG_DATA_HOME', str(tmp_path))
+    name = 'io.github.vip3rousmango.CouchCHD'
+    svg = tmp_path / f'icons/hicolor/scalable/apps/{name}.svg'
+    svg.parent.mkdir(parents=True)
+    svg.write_bytes(b'personal SVG')
+    launcher = tmp_path / 'run'
+    entry = tmp_path / f'applications/{name}.desktop'
+    entry.parent.mkdir()
+    entry.write_text('[Desktop Entry]\nType=Application\nName=CouchCHD\n'
+                     f'Exec="{launcher}"\nIcon={name}\nTerminal=false\nCategories=Utility;Compression;\n')
+    for _ in range(2):
+        assert str(svg) in refresh_desktop_artwork(launcher)
+        assert f'Icon={svg}\n' in entry.read_text()
+    assert svg.read_bytes() == b'personal SVG'
+    assert not (tmp_path / 'couchchd/artwork/icon.png').exists()
+
+
+@pytest.mark.parametrize('linked', ['icons', 'icons/hicolor/scalable/apps/io.github.vip3rousmango.CouchCHD.svg',
+                                    'couchchd/artwork', 'couchchd/artwork/icon.png'])
+def test_icon_links_refused_without_registering(tmp_path, monkeypatch, linked):
+    monkeypatch.setenv('XDG_DATA_HOME', str(tmp_path))
+    link = tmp_path / linked
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(tmp_path / 'missing')
+    with pytest.raises(ValueError):
+        install_desktop(tmp_path / 'run')
+    assert not (tmp_path / 'applications').exists()
+    assert not (tmp_path / 'missing').exists()
 
 
 @pytest.mark.parametrize('xdg', [False, True])

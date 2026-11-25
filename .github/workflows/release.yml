@@ -62,6 +62,21 @@ jobs:
           else
             entry="$XDG_DATA_HOME/applications/io.github.vip3rousmango.CouchCHD.desktop"
             desktop-file-validate "$entry"
+            # Parse via GLib's desktop-entry implementation, not by grepping
+            # Icon=. The icon must resolve without any themed icon cache.
+            /usr/bin/python3 - "$entry" <<'PY'
+          from gi.repository import Gio
+          from pathlib import Path
+          import os, sys
+          app = Gio.DesktopAppInfo.new_from_filename(sys.argv[1])
+          icon = app.get_icon()
+          assert isinstance(icon, Gio.FileIcon), icon
+          png = Path(icon.get_file().get_path())
+          assert png.is_absolute() and png.is_relative_to(os.environ['XDG_DATA_HOME']), png
+          from gi.repository import GdkPixbuf
+          cover = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(png), 32, 32, True)
+          assert cover.get_width() == 32 and cover.get_height() == 32 and any(cover.get_pixels())
+          PY
             xvfb-run -a -s '-screen 0 1280x800x24 -extension GLX' bash -eu -c '
               gio launch "$1"
               timeout 60 xdotool search --sync --onlyvisible --name "^CouchCHD"

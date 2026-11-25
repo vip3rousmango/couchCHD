@@ -13,6 +13,7 @@ import vdf
 
 from ..ledger import install_new
 from ..menu_entry import host_home_path
+from ..stock_art import upgrade_stock
 
 ASSETS = Path(__file__).with_name('assets')
 
@@ -317,9 +318,15 @@ def _fill_grid(grid: Path, appid: int, *, selected_icon: bytes) -> list[str]:
     own_icon = os.fsencode(grid / f'{appid}_icon.png')
     for suffix, asset, label in _SLOTS:
         stem = f'{appid}{suffix}'
-        if (suffix == '_icon' and selected_icon not in (b'', own_icon)) or stem in occupied:
+        if suffix == '_icon' and selected_icon not in (b'', own_icon):
             continue
-        if _create(grid / f'{stem}.png', (ASSETS / f'{asset}.png').read_bytes()):
+        dest = grid / f'{stem}.png'
+        image = ASSETS / f'{asset}.png'
+        existing = occupied.get(stem)
+        if existing:
+            if existing == [dest] and upgrade_stock(dest, image):
+                added.append(label)
+        elif _create(dest, image.read_bytes()):
             added.append(label)
     return added
 
@@ -347,7 +354,7 @@ def refresh_artwork(launcher: Path) -> str:
         raise RuntimeError('The active Steam profile or shortcuts changed. Try again.')
     selected_icon = values.get(b'icon', b'')
     added = _fill_grid(grid, appid, selected_icon=selected_icon)
-    result = ('Added Steam artwork: ' + ', '.join(added) + '.' if added
+    result = ('Refreshed Steam artwork: ' + ', '.join(added) + '.' if added
               else 'No missing Steam artwork files; existing choices kept.')
     if not selected_icon:
         result += ' To attach the shortcut icon, exit Steam and choose Add to Steam in CouchCHD Settings.'

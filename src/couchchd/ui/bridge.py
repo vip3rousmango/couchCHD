@@ -553,7 +553,7 @@ class Bridge(QObject):
             row('sound', 'Interface sounds', 'Quiet navigation ticks and batch feedback.', 'On' if self.sound else 'Off'),
             row('rumble', 'Controller vibration', 'Pulse on completion or when attention is needed.', 'On' if self.rumble else 'Off'),
             row('update', 'Update CouchCHD', 'Check the public release and install it for your next launch.'),
-            *([row('art', 'Refresh launcher artwork', 'Fill missing artwork on existing entries; keep custom images.')]
+            *([row('art', 'Refresh launcher artwork', 'Update stock artwork and fill empty slots. Keep custom images.')]
               if launcher_art.managed_launcher() else []),
             row('steam', 'Add to Steam', 'Register the launcher, grid artwork, and gamepad layout.'), row('exit', 'Exit CouchCHD')], reset=reset)
 

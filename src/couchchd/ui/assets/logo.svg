@@ -1,15 +1,30 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="640" height="240" viewBox="0 0 640 240">
-  <title>CouchCHD — cut-disc monogram</title>
-  <!-- An outlined lockup stays legible on both the supplied hero and custom imagery. -->
-  <g stroke="#192221" stroke-linejoin="round">
-    <path d="M210 157a97 97 0 1 1 0-74l-31 13a64 64 0 1 0 0 48z" fill="#dbf483" stroke-width="6"/>
-    <path d="M166 139a49 49 0 1 1 0-38l-13 6a35 35 0 1 0 0 26z" fill="#dbf483" stroke-width="4"/>
-    <circle cx="120" cy="120" r="16" fill="#192221" stroke-width="4"/>
-    <circle cx="120" cy="120" r="11" fill="none" stroke="#dbf483" stroke-width="5"/>
-    <g fill="#f1f1e9" stroke-width="6">
-      <path d="M347 77c-13-12-30-18-48-18-40 0-70 25-70 61s30 61 70 61c18 0 35-6 48-18l-19-20c-8 8-18 12-29 12-22 0-38-14-38-35s16-35 38-35c11 0 21 4 29 12z"/>
-      <path d="M360 61h30v43h49V61h30v118h-30v-48h-49v48h-30z"/>
-      <path fill-rule="evenodd" d="M490 61h49c46 0 75 22 75 59s-29 59-75 59h-49z M521 88v64h18c28 0 43-11 43-32s-15-32-43-32z"/>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="640" height="240" viewBox="0 0 640 240">
+  <title>CouchCHD — arcade wordmark</title>
+  <defs>
+    <g id="couch" fill-rule="evenodd" transform="skewX(-9)">
+        <path transform="translate(0)" d="M64 0H22Q16 0 12 5L3 15Q0 19 0 25V57Q0 63 5 68L12 74Q15 77 22 77H50L64 63V52H44L40 57H28Q22 57 22 51V28Q22 21 29 21H52Z"/>
+        <path transform="translate(69)" d="M20 0H51Q58 0 62 5L67 11Q70 15 70 22V52Q70 59 65 65L57 73Q53 77 47 77H20Q14 77 9 72L4 67Q0 63 0 55V24Q0 17 5 12L13 4Q16 0 20 0ZM29 21L23 27V51Q23 56 28 56H39L47 48V26Q47 21 42 21Z"/>
+        <path transform="translate(144)" d="M0 0H23V51Q23 56 29 56H39L45 50V0H68V56Q68 62 63 67L57 73Q53 77 46 77H21Q14 77 9 72L4 67Q0 63 0 56Z"/>
+        <path transform="translate(217)" d="M64 0H22Q16 0 12 5L3 15Q0 19 0 25V57Q0 63 5 68L12 74Q15 77 22 77H50L64 63V52H44L40 57H28Q22 57 22 51V28Q22 21 29 21H52Z"/>
+        <path transform="translate(286)" d="M0 0H23V28H46V0H69V77H46V47H23V77H0Z"/>
+      </g>
+    <g id="chd" fill-rule="evenodd" transform="skewX(-9)">
+        <path transform="translate(0)" d="M64 0H22Q16 0 12 5L3 15Q0 19 0 25V57Q0 63 5 68L12 74Q15 77 22 77H50L64 63V52H44L40 57H28Q22 57 22 51V28Q22 21 29 21H52Z"/>
+        <path transform="translate(69)" d="M0 0H23V28H46V0H69V77H46V47H23V77H0Z"/>
+        <path transform="translate(143)" d="M0 0H45Q52 0 56 4L64 12Q68 16 68 23V51Q68 58 63 63L53 73Q49 77 43 77H0ZM23 20V57H34L45 46V27Q45 20 38 20Z"/>
+      </g>
+  </defs>
+  <!-- Solid dark keylines keep the cut letters distinct on custom library heroes. -->
+  <g transform="translate(29 61) scale(1.05 1.40)">
+    <g stroke="#20182F" stroke-width="8" stroke-linejoin="round" fill="#20182F">
+      <use xlink:href="#couch" />
+      <use xlink:href="#chd" transform="translate(359)"/>
+      <use xlink:href="#couch" transform="translate(0 6)"/>
+      <use xlink:href="#chd" transform="translate(359 6)"/>
     </g>
+    <use xlink:href="#couch" transform="translate(0 5)" fill="#EB5797"/>
+    <use xlink:href="#chd" transform="translate(359 5)" fill="#FF795B"/>
+    <use xlink:href="#couch" fill="#FFF1CF"/>
+    <use xlink:href="#chd" transform="translate(359)" fill="#DFFF72"/>
   </g>
 </svg>
