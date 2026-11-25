@@ -39,7 +39,7 @@ def _steam_dir() -> Path:
     raise RuntimeError('Steam user data was not found. Sign into Steam on this device first.')
 
 
-def _offline(steam: Path) -> None:
+def _running(steam: Path) -> bool:
     if os.name == 'nt':
         import winreg
         try:
@@ -61,7 +61,11 @@ def _offline(steam: Path) -> None:
                 continue
             except (ValueError, OverflowError) as exc:
                 raise RuntimeError(f'Cannot determine whether Steam is running: invalid {file}. No shortcuts were changed.') from exc
-    if active or os.environ.get('SteamAppId') or os.environ.get('SteamGameId'):
+    return bool(active or os.environ.get('SteamAppId') or os.environ.get('SteamGameId'))
+
+
+def _offline(steam: Path) -> None:
+    if _running(steam):
         raise SteamRunning('Exit Steam completely, then launch CouchCHD outside Gaming Mode and try again. Steam can overwrite shortcuts while running.')
 
 
@@ -145,6 +149,7 @@ def _known_target(target: Path, launcher: Path, named: bool) -> bool:
         return False
     target = host_home_path(target)
     name = target.name.casefold()
+    launcher = host_home_path(launcher)
     if target == launcher:
         return True
     data = host_home_path(Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share'))
@@ -212,6 +217,23 @@ def _locate(original: bytes, launcher: Path):
     return (matches[0] if matches else None), ids, str(1 + max(indices, default=-1))
 
 
+def _edit_fields(original: bytes, match, replacements: dict[bytes, bytes]) -> bytes:
+    _, _, spans, values, entry_end = match
+    edits = []
+    for field, value in replacements.items():
+        if values.get(field) == value:
+            continue
+        if field in spans:
+            begin, stop = spans[field]
+            edits.append((begin, stop, value + b'\0'))
+        else:
+            label = {b'startdir': b'StartDir', b'icon': b'icon'}[field]
+            edits.append((entry_end, entry_end, b'\x01' + label + b'\0' + value + b'\0'))
+    for begin, stop, value in sorted(edits, reverse=True):
+        original = original[:begin] + value + original[stop:]
+    return original
+
+
 def _shortcut(original: bytes | None, launcher: Path, grid: Path) -> tuple[bytes, int, bytes]:
     if not launcher.is_absolute() or any(c == '"' or ord(c) < 32 for c in str(launcher)):
         raise ValueError('Steam needs an absolute launcher path without quotes or control characters.')
@@ -220,7 +242,7 @@ def _shortcut(original: bytes | None, launcher: Path, grid: Path) -> tuple[bytes
         original = vdf.binary_dumps({'shortcuts': {}})
     match, ids, index = _locate(original, launcher)
     if match:
-        old_id, target, spans, values, entry_end = match
+        old_id, target, _, values, _ = match
         replacements = {b'exe': exe.encode(), b'startdir': f'"{launcher.parent}"'.encode()}
         if not values.get(b'icon'):
             icon = _icon_path(grid, old_id)
@@ -232,19 +254,7 @@ def _shortcut(original: bytes | None, launcher: Path, grid: Path) -> tuple[bytes
             replacements[b'launchoptions'] = b''
         elif options and target != launcher:
             raise RuntimeError('CouchCHD has custom Steam launch options. Review and clear them before repairing the target; no shortcuts were changed.')
-        edits = []
-        for field, value in replacements.items():
-            if values.get(field) == value:
-                continue
-            if field in spans:
-                begin, stop = spans[field]
-                edits.append((begin, stop, value + b'\0'))
-            else:
-                label = {b'startdir': b'StartDir', b'icon': b'icon'}[field]
-                edits.append((entry_end, entry_end, b'\x01' + label + b'\0' + value + b'\0'))
-        for begin, stop, value in sorted(edits, reverse=True):
-            original = original[:begin] + value + original[stop:]
-        return original, old_id, values.get(b'icon', b'')
+        return _edit_fields(original, match, replacements), old_id, values.get(b'icon', b'')
     appid = zlib.crc32((exe + 'CouchCHD').encode()) | 0x80000000
     if appid in ids:
         raise RuntimeError('A different Steam shortcut uses this ID. No shortcuts were changed.')
@@ -315,24 +325,59 @@ def _fill_grid(grid: Path, appid: int, *, selected_icon: bytes) -> list[str]:
     grid.mkdir(exist_ok=True)
     added = []
     occupied = _art_files(grid, {f'{appid}{suffix}' for suffix, _, _ in _SLOTS})
-    own_icon = os.fsencode(grid / f'{appid}_icon.png')
+    icon_name = f'{appid}_icon.png'
+    if selected_icon:
+        chosen = Path(os.fsdecode(selected_icon))
+        # Steam/native home aliases can spell the very same grid directory
+        # differently. Only compare the parent; never write via the VDF path.
+        try:
+            if (chosen.is_absolute() and chosen.stem.casefold() == f'{appid}_icon'
+                    and chosen.suffix.casefold() in ('.png', '.svg') and chosen.parent.samefile(grid)):
+                icon_name = chosen.name
+            else:
+                icon_name = ''
+        except OSError:
+            icon_name = ''
     for suffix, asset, label in _SLOTS:
         stem = f'{appid}{suffix}'
-        if suffix == '_icon' and selected_icon not in (b'', own_icon):
+        if suffix == '_icon' and not icon_name:
             continue
-        dest = grid / f'{stem}.png'
+        dest = grid / (icon_name if suffix == '_icon' else f'{stem}.png')
         image = ASSETS / f'{asset}.png'
         existing = occupied.get(stem)
         if existing:
-            if existing == [dest] and upgrade_stock(dest, image):
+            ext = existing[0].suffix.casefold()
+            if (len(existing) == 1 and ext in ('.png', '.svg')
+                    and upgrade_stock(existing[0], image.with_suffix(ext), steam_legacy=True)):
                 added.append(label)
-        elif _create(dest, image.read_bytes()):
+        elif dest.suffix.casefold() == '.png' and _create(dest, image.read_bytes()):
             added.append(label)
     return added
 
 
+def _save_shortcuts(steam: Path, file: Path, original: bytes | None, blob: bytes) -> None:
+    if blob == original:
+        return
+    with tempfile.NamedTemporaryFile(dir=file.parent, prefix='.couchchd-', delete=False) as out:
+        temp = Path(out.name)
+        try:
+            out.write(blob)
+            out.flush()
+            os.fsync(out.fileno())
+            out.close()
+            _offline(steam)
+            if (_config(steam) != file.parent or
+                    (file.read_bytes() if file.exists() else None) != original):
+                raise RuntimeError('Steam shortcuts or the active account changed. Try again with Steam closed.')
+            if original is not None:
+                _create(file.with_name('shortcuts.vdf.couchchd-backup'), original)
+            os.replace(temp, file)
+        finally:
+            temp.unlink(missing_ok=True)
+
+
 def refresh_artwork(launcher: Path) -> str:
-    """Fill missing art for an existing managed shortcut without editing Steam's database."""
+    """Refresh existing artwork; attach a missing shortcut icon only with Steam closed."""
     steam = _steam_dir()
     config = _config(steam)
     file, grid = _steam_paths(steam, config)
@@ -352,12 +397,25 @@ def refresh_artwork(launcher: Path) -> str:
         raise RuntimeError('The running Steam game ID does not match this shortcut. No artwork changed.')
     if _config(steam) != config or file.read_bytes() != original:
         raise RuntimeError('The active Steam profile or shortcuts changed. Try again.')
+    running = _running(steam)
     selected_icon = values.get(b'icon', b'')
     added = _fill_grid(grid, appid, selected_icon=selected_icon)
     result = ('Refreshed Steam artwork: ' + ', '.join(added) + '.' if added
-              else 'No missing Steam artwork files; existing choices kept.')
-    if not selected_icon:
-        result += ' To attach the shortcut icon, exit Steam and choose Add to Steam in CouchCHD Settings.'
+              else 'No missing slots or recognized stock replacements; existing artwork kept.')
+    if not selected_icon and not running:
+        icon = _icon_path(grid, appid)
+        if icon is None:
+            result += ' Conflicting or linked shortcut icons kept; choose an icon in Steam.'
+        else:
+            try:
+                _save_shortcuts(steam, file, original, _edit_fields(original, match, {b'icon': os.fsencode(icon)}))
+                result += ' Shortcut icon attached.'
+            except SteamRunning:
+                running = True
+    if running:
+        if not selected_icon:
+            result += ' To attach the shortcut icon, exit Steam and run Refresh launcher artwork from Applications.'
+        result += ' If old images are still visible, fully exit and restart Steam to reload its artwork.'
     return result
 
 
@@ -376,21 +434,5 @@ def register(launcher: Path | None = None) -> str:
     templates.mkdir(parents=True, exist_ok=True)
     name = 'couchchd_joystick_trackpad.vdf'
     _create(templates / name, (ASSETS / name).read_bytes())
-    if blob != original:
-        temp: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(dir=config, prefix='.couchchd-', delete=False) as out:
-                temp = Path(out.name)
-                out.write(blob)
-                out.flush()
-                os.fsync(out.fileno())
-            _offline(steam)
-            if (file.read_bytes() if file.exists() else None) != original:
-                raise RuntimeError('Steam shortcuts changed during registration. Try again with Steam closed.')
-            if original is not None:
-                _create(config / 'shortcuts.vdf.couchchd-backup', original)
-            os.replace(temp, file)
-        finally:
-            if temp is not None:
-                temp.unlink(missing_ok=True)
+    _save_shortcuts(steam, file, original, blob)
     return 'Open Steam and find CouchCHD in Library → Non-Steam. Use the Gamepad with Joystick Trackpad layout.'

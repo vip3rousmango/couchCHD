@@ -1,5 +1,7 @@
 import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -213,6 +215,7 @@ def test_live_refresh_uses_recorded_id_and_never_edits_shortcuts(profile, monkey
     (grid / f'{appid}_LOGO.JpEg').write_bytes(b'my logo')
     message = steam.refresh_artwork(launcher)
     assert 'portrait, landscape, hero, icon' in message and 'exit Steam' in message
+    assert 'restart Steam' in message
     assert 'No missing' in steam.refresh_artwork(launcher)
     assert file.read_bytes() == original
     assert {p.name for p in file.parent.iterdir()} == {'grid', 'shortcuts.vdf'}
@@ -227,7 +230,7 @@ def test_refresh_replaces_only_recognized_stock_for_the_same_slot(profile, monke
 
     launcher, file, appid = profile
     previous = b'old portrait'
-    monkeypatch.setitem(stock_art._PREVIOUS, 'grid', (len(previous), sha256(previous).hexdigest()))
+    monkeypatch.setitem(stock_art._PREVIOUS, 'grid.png', {len(previous): sha256(previous).hexdigest()})
     grid = file.parent / 'grid'
     grid.mkdir()
     portrait = grid / f'{appid}p.png'
@@ -243,6 +246,75 @@ def test_refresh_replaces_only_recognized_stock_for_the_same_slot(profile, monke
     portrait.write_bytes(previous)
     steam.refresh_artwork(launcher)
     assert portrait.read_bytes() == (steam.ASSETS / 'grid.png').read_bytes()
+
+
+@pytest.mark.parametrize('action', [steam.register, steam.refresh_artwork])
+@pytest.mark.skipif(os.name == 'nt', reason='native Linux Steam layout')
+def test_device_rendered_preview_art_migrates_in_both_flows(profile, action):
+    """Previews 1–4 did not ship PNGs. Exercise their actual Qt writer."""
+    pytest.importorskip('PySide6')
+    launcher, file, appid = profile
+    original = file.read_bytes()
+    # The rest of the suite may own a QCoreApplication, which cannot be
+    # upgraded to a QGuiApplication.
+    env = dict(os.environ, QT_QPA_PLATFORM='offscreen', PYTHONPATH=str(Path(steam.__file__).parents[2]))
+    subprocess.run([sys.executable, __file__, action.__name__, str(launcher), str(file.parent / 'grid'), str(appid)],
+                   check=True, env=env, timeout=30)
+    entry = vdf.binary_loads(file.read_bytes())['shortcuts']['7']
+    assert entry['icon'] == str(file.parent / 'grid' / f'{appid}_icon.png')
+    if action == steam.refresh_artwork:
+        expected = vdf.binary_loads(original)['shortcuts']['7']
+        assert entry == dict(expected, icon=entry['icon'])
+
+
+def _render_preview_and_upgrade(action, launcher, grid, appid):
+    from hashlib import sha1
+    QtGui = pytest.importorskip('PySide6.QtGui')
+    from PySide6.QtCore import QByteArray, QBuffer, QIODevice
+    from PySide6.QtSvg import QSvgRenderer
+
+    grid.mkdir()
+    # Another game's files, even identical stock bytes, are not ours to edit.
+    app = QtGui.QGuiApplication.instance() or QtGui.QGuiApplication(['fixture', '-platform', 'offscreen'])
+    assert app
+    for name, suffix, blob_id in (
+            ('grid', 'p', '76aa72e553dccb59cacb08a0518cbfae7b7456e6'),
+            ('hero', '_hero', '72f9d965b4ce7dd624eef50933da31536a9c57e1')):
+        svg = steam.ASSETS / f'preview4-{name}.svg'
+        data = svg.read_bytes()
+        assert sha1(f'blob {len(data)}\0'.encode() + data).hexdigest() == blob_id
+        renderer = QSvgRenderer(str(svg))
+        image = QtGui.QImage(renderer.defaultSize(), QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+        # Preserve the resolution of a different desktop/docked display.
+        image.setDotsPerMeterX(4800)
+        image.setDotsPerMeterY(4800)
+        image.fill(0)
+        painter = QtGui.QPainter(image)
+        renderer.render(painter)
+        painter.end()
+        buf = QByteArray()
+        stream = QBuffer(buf)
+        stream.open(QIODevice.OpenModeFlag.WriteOnly)
+        assert image.save(stream, 'PNG')
+        (grid / f'{appid}{suffix}.png').write_bytes(bytes(buf))
+        (grid / f'42{suffix}.png').write_bytes(bytes(buf))
+        if name == 'grid':
+            image.setPixelColor(0, 0, QtGui.QColor('red'))
+            custom_buf = QByteArray()
+            custom_stream = QBuffer(custom_buf)
+            custom_stream.open(QIODevice.OpenModeFlag.WriteOnly)
+            assert image.save(custom_stream, 'PNG')
+            custom = bytes(custom_buf)
+    getattr(steam, action)(launcher)
+    for name, suffix in [('grid', 'p'), ('hero', '_hero')]:
+        new = (steam.ASSETS / f'{name}.png').read_bytes()
+        assert (grid / f'{appid}{suffix}.png').read_bytes() == new
+        assert (grid / f'42{suffix}.png').read_bytes() != new
+    # Same SVG, dimensions, encoder and all but one pixel: still custom.
+    portrait = grid / f'{appid}p.png'
+    portrait.write_bytes(custom)
+    getattr(steam, action)(launcher)
+    assert portrait.read_bytes() == custom
 
 
 @pytest.mark.parametrize('conflict', ['wrong-game', 'wrong-app', 'other-installation', 'other-account',
@@ -275,6 +347,34 @@ def test_live_refresh_fails_closed(profile, monkeypatch, conflict):
     assert not list(file.parents[2].rglob('*.png')) and not list(launcher.parent.glob('*.png'))
 
 
+def test_imported_appimage_icon_in_aliased_grid_keeps_its_vdf_path(profile, monkeypatch):
+    launcher, file, appid = profile
+    grid = file.parent / 'grid'
+    grid.mkdir()
+    alias = launcher.parent / 'grid-alias'
+    alias.symlink_to(grid, target_is_directory=True)
+    icon = grid / f'{appid}_ICON.SVG'
+    # packaging/couchchd.svg embedded by AppImage previews 1–4.
+    icon.write_bytes(b'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <title>CouchCHD</title>
+  <rect x="3" y="3" width="122" height="122" rx="28" fill="#10283a"/>
+  <circle cx="64" cy="58" r="41" fill="#e0f2f1"/>
+  <circle cx="64" cy="58" r="12" fill="#10283a"/>
+  <path d="m34 49 17 5m17-26-2 15m27 17-15-1" stroke="#63b9bd" stroke-width="4" stroke-linecap="round"/>
+  <path d="M20 76h13l9 15h44l9-15h13l-10 31H30z" fill="#5bd8a4" stroke="#10283a" stroke-width="4" stroke-linejoin="round"/>
+</svg>
+''')
+    entries = vdf.binary_loads(file.read_bytes())
+    entries['shortcuts']['7']['icon'] = str(alias / icon.name)
+    original = vdf.binary_dumps(entries)
+    file.write_bytes(original)
+    monkeypatch.setenv('SteamAppId', str(appid))
+    assert 'restart Steam' in steam.refresh_artwork(launcher)
+    assert file.read_bytes() == original
+    assert icon.read_bytes() == (steam.ASSETS / 'icon.svg').read_bytes()
+    assert not (grid / f'{appid}_icon.png').exists()
+
+
 def test_external_icon_preserved_without_another_steam_icon(profile):
     launcher, file, appid = profile
     entries = vdf.binary_loads(file.read_bytes())
@@ -284,3 +384,7 @@ def test_external_icon_preserved_without_another_steam_icon(profile):
     assert not (file.parent / 'grid' / f'{appid}_icon.png').exists()
     steam.register(launcher)
     assert vdf.binary_loads(file.read_bytes())['shortcuts']['7']['icon'] == '/chosen custom art/ICON.ico'
+
+
+if __name__ == '__main__':
+    _render_preview_and_upgrade(sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]))

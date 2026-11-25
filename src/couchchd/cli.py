@@ -58,7 +58,13 @@ def _register_desktop_steam(launcher: Path) -> str:
                 if remaining <= 0:
                     break
                 time.sleep(min(1, remaining))
-        return f'Steam shortcut deferred; the Applications menu launcher is ready. {retry}'
+        # An existing shortcut's grid images can be updated independently.
+        # Never try to create or repair a live client's shortcut database.
+        try:
+            art = steam.refresh_artwork(launcher)
+        except (OSError, RuntimeError, ValueError) as exc:
+            art = f'Steam artwork not refreshed: {exc}'
+        return f'{art}\nSteam shortcut registration deferred; the Applications menu launcher is ready. {retry}'
     except (ImportError, OSError, RuntimeError, ValueError) as exc:
         return f'Steam shortcut not registered: {exc} The Applications menu launcher is ready. {retry}'
 

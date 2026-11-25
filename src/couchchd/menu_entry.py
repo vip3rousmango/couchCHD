@@ -1,5 +1,4 @@
 """Publish native frontend entries without overwriting user customizations."""
-import hashlib
 import os
 import shlex
 import stat
@@ -11,7 +10,6 @@ from .ledger import install_new
 
 _ASSETS = Path(__file__).parent / 'ui/assets'
 _DESKTOP_ID = 'io.github.vip3rousmango.CouchCHD'
-_PREVIEW7_SVG_SHA256 = 'df3bd1f1509f861da75dc4f13dc460a2bab14e7cfca9f7779cf7a08e22874c47'
 _HOME_ROOT = Path('/home')
 
 
@@ -125,24 +123,31 @@ def _desktop(launcher: Path, *, install: bool) -> tuple[Path, str]:
                         entry(_DESKTOP_ID, 'Game;Utility;'), entry('applications-games', 'Game;Utility;')):
         return path, 'Customized desktop entry kept; no artwork changed.'
 
+    from .stock_art import upgrade_stock
+
     icon, current = raster, raster_entry
-    if previous != raster_entry:
-        _check_path(legacy)
-        old_svg = read_regular(legacy)
-        if old_svg is not None and hashlib.sha256(old_svg).hexdigest() != _PREVIEW7_SVG_SHA256:
+    # A previously imported Steam or pinned desktop shortcut can still refer
+    # to the old themed SVG, even after our .desktop file switched to PNG.
+    _check_path(legacy)
+    updated = False
+    if legacy.exists():
+        svg = _ASSETS / 'icon.svg'
+        updated = upgrade_stock(legacy, svg)
+        if not updated and previous != raster_entry and read_regular(legacy) != svg.read_bytes():
             icon, current = legacy, legacy_entry
-    added = False
     if icon == raster:
         _check_path(raster)
         if not raster.exists():
             raster.parent.mkdir(parents=True, exist_ok=True)
             store_entry(raster, (_ASSETS / 'icon.png').read_bytes(), None, 0o644)
-            added = True
+            updated = True
         elif not raster.is_file():
             raise ValueError(f'Leaving non-file desktop icon unchanged: {raster}')
+        else:
+            updated |= upgrade_stock(raster, _ASSETS / 'icon.png')
     path.parent.mkdir(parents=True, exist_ok=True)
     store_entry(path, current, previous, 0o644)
-    status = 'already present' if previous == current and not added else 'registered'
+    status = 'registered' if previous != current else 'updated' if updated else 'already present'
     return path, f'Desktop menu icon {status}: {icon}'
 
 

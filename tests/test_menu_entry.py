@@ -76,11 +76,21 @@ def test_migrate_only_exact_managed_desktop_and_keep_replacement_icon(tmp_path, 
   </g>
 </svg>
 ''', encoding='utf-8')
+        old_svg = svg.read_bytes()
     refresh_desktop_artwork(launcher)
     icon = tmp_path / 'couchchd/artwork/icon.png'
     assert f'Icon={icon}\n' in entry.read_text() and 'Categories=Utility;Compression;\n' in entry.read_text()
     assert entry.stat().st_mode & 0o777 == 0o640
     assert icon.read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
+    if old_icon == name:
+        from couchchd.ui import __file__ as ui_file
+        current_svg = Path(ui_file).parent / 'assets/icon.svg'
+        assert svg.read_bytes() == current_svg.read_bytes()
+        # Preview.8/.9 may already have changed Icon= while leaving this
+        # linked-from-elsewhere old themed asset behind.
+        svg.write_bytes(old_svg)
+        install_desktop(launcher)
+        assert svg.read_bytes() == current_svg.read_bytes()
     icon.write_bytes(b'custom artwork')
     mtimes = (icon.stat().st_mtime_ns, entry.stat().st_mtime_ns)
     assert str(icon) in refresh_desktop_artwork(launcher)
