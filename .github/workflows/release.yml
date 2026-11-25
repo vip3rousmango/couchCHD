@@ -26,7 +26,10 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platform-tools" "emulator" "system-images;android-31;default;x86_64"
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
           sudo chmod a+rw /dev/kvm
+          export ANDROID_USER_HOME="$RUNNER_TEMP/android-user" ANDROID_AVD_HOME="$RUNNER_TEMP/android-user/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
           echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n receiver -k 'system-images;android-31;default;x86_64'
+          test -s "$ANDROID_AVD_HOME/receiver.ini"
           nohup "$ANDROID_HOME/emulator/emulator" -avd receiver -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >"$RUNNER_TEMP/emulator.log" 2>&1 </dev/null &
       - name: Build signed Android companion
         if: github.event_name == 'push'
