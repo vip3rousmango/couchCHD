@@ -90,9 +90,7 @@ def main(argv=None):
                     messages.append(_register_desktop_steam(launcher))
             elif frontend == 'recalbox':
                 from .recalbox_menu import register
-                if launcher.parts[-3:] != ('system', 'couchchd', 'run-couchchd'):
-                    raise ValueError('Recalbox launcher must be installed under SHARE/system/couchchd.')
-                register(launcher.parents[2])
+                register(launcher=launcher)
                 return 0
             elif frontend == 'ports':
                 if args.root is None or not args.root.is_dir():

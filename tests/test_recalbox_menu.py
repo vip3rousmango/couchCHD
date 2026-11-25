@@ -3,12 +3,15 @@ import os
 import shlex
 import stat
 import subprocess
+from pathlib import Path
 from xml.etree import ElementTree as ET
 
 import pytest
 
 from couchchd import recalbox_menu
+from couchchd.cli import main
 from couchchd.recalbox_menu import refresh_artwork, register
+from couchchd.ui import launcher_art
 
 
 pytestmark = pytest.mark.skipif(os.name != 'posix', reason='Recalbox installer targets Linux')
@@ -130,3 +133,76 @@ def test_migrate_preview4_gamelist_only_after_frontend_exit(tmp_path, monkeypatc
 def test_refresh_never_creates_missing_port(tmp_path):
     assert 'No registered' in refresh_artwork(tmp_path)
     assert not list(tmp_path.iterdir())
+
+
+@pytest.fixture
+def device(tmp_path, monkeypatch):
+    root = tmp_path.resolve()
+    share = root / 'recalbox/share'
+    media = root / 'media'
+    disks = (share, share.parent / 'share_int', media / 'Local Disk')
+    for disk in disks:
+        disk.mkdir(parents=True)
+    (share / 'system').mkdir()
+    monkeypatch.setattr(recalbox_menu, 'SHARE', share)
+    monkeypatch.setattr(recalbox_menu, '_MEDIA', media)
+    monkeypatch.setattr(Path, 'is_mount', lambda path: path in disks)
+    return share, disks
+
+
+def _install_wrapper(base):
+    base.mkdir(parents=True, exist_ok=True)
+    launcher = base / 'run-couchchd'
+    launcher.write_text('#!/bin/sh\nprintf "%s:%s\\n" "$0" "$#"\n')
+    launcher.chmod(0o755)
+    return launcher
+
+
+@pytest.mark.parametrize('index', [0, 1, 2])
+def test_retarget_managed_port_and_refresh_shared_artwork(device, index):
+    share, disks = device
+    config = share / 'system/.emulationstation/systemlist.xml'
+    config.parent.mkdir()
+    before = b'<systemList><!-- personal --><system name="keep"/>'
+    after = b'</systemList><!-- keep this too -->'
+    config.write_bytes(before + after)
+    # Use the original CLI contract; an already-installed port may now point
+    # at a noexec SHARE. No need to execute its old wrapper to retarget it.
+    original = _install_wrapper(share / 'system/couchchd')
+    assert main(['--register-frontend', 'recalbox', str(original)]) == 0
+    launcher = _install_wrapper(disks[index] / 'couchchd')
+    assert main(['--register-frontend', 'recalbox', str(launcher)]) == 0
+    registered = config.read_bytes()
+    assert registered.startswith(before) and registered.endswith(after)
+    command, = [d.get('command') for d in ET.fromstring(registered).findall('system/descriptor')]
+    assert subprocess.check_output(['/bin/sh', '-c', command + ' -systemtype port'], text=True) == f'{launcher}:0\n'
+    assert main(['--register-frontend', 'recalbox', str(launcher)]) == 0 and config.read_bytes() == registered
+    roms = share / 'roms/ports/couchchd'
+    assert (roms / 'CouchCHD.game').is_file() and (roms / 'gamelist.xml').is_file()
+    cover = roms / 'media/CouchCHD.png'
+    cover.unlink()
+    assert 'installed' in launcher_art.refresh(launcher) and cover.is_file()
+    if disks[index] != share:
+        assert not (disks[index] / 'roms').exists() and not (disks[index] / 'system').exists()
+
+
+def test_relocation_leaves_custom_descriptor_unchanged(device):
+    share, disks = device
+    register(share)
+    config = share / 'system/.emulationstation/systemlist.xml'
+    custom = config.read_bytes().replace(b'theme="ports"', b'theme="mine"')
+    config.write_bytes(custom)
+    launcher = _install_wrapper(disks[2] / 'couchchd')
+    with pytest.raises(ValueError, match='Conflicting'):
+        register(launcher=launcher)
+    assert config.read_bytes() == custom
+
+
+def test_refuse_unmounted_nested_and_linked_install_locations(device):
+    share, disks = device
+    alias = disks[2].parent / 'alias'
+    alias.symlink_to(disks[2], target_is_directory=True)
+    for location in (alias, disks[2].parent / 'unmounted', disks[2] / 'subdir', share.parent / 'boot'):
+        launcher = _install_wrapper(location / 'couchchd')
+        assert main(['--register-frontend', 'recalbox', str(launcher)]) == 1
+    assert not (share / 'system/.emulationstation').exists()
