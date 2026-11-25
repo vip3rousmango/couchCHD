@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PureWindowsPath
 
-from . import archive7z
+from . import archive7z, disc_zip
 from .output_formats import SUFFIX_BY_MODE
 
 
@@ -84,6 +84,7 @@ class Game:
     frames: tuple[int, ...]
     sheet: tuple[str | FileLine, ...] = field(repr=False)
     stamps: tuple[_STAMP, ...] = field(repr=False)
+    archive: disc_zip.Archive | None = field(default=None, repr=False)
 
     def assert_unchanged(self, path: Path | None = None) -> None:
         pairs = zip(self.files, self.stamps) if path is None else ((path, self.stamps[self.files.index(path)]),)
@@ -171,7 +172,13 @@ def select_format(game: Game, psp_format: str) -> Game:
     if mode == 'cso':
         from . import cso
         game.assert_unchanged()
-        cso.validate(game.source, game.system)
+        if game.archive is None:
+            cso.validate(game.source, game.system)
+        else:
+            with disc_zip.catalog(game.source, game.stamps[0]) as (members, prefix):
+                signature = prefix(members[0], 16 * 2048 + 7)[-7:]
+            if signature[1:] != b'CD001\x01' or signature[0] not in range(4):
+                raise ValueError('PSP ISO lacks an ISO 9660 volume descriptor')
         game.assert_unchanged()
     return replace(game, mode=mode)
 
@@ -337,6 +344,10 @@ def _descriptors(path: Path):
         data = f.read(1024 * 1024 + 1)
     if len(data) > 1024 * 1024:
         raise ValueError(f'Descriptor exceeds 1 MiB: {path}')
+    yield from _decode_descriptor(path, data)
+
+
+def _decode_descriptor(path: Path, data: bytes):
     error = None
     for encoding in ('utf-8-sig', 'cp1252', 'shift_jis'):
         try:
@@ -428,32 +439,102 @@ def _gdi_frames(tracks: list[_Track], sizes: dict[Path, int], lines: list) -> li
     return frames
 
 
-def _iso(path: Path, size: int, system: str) -> tuple[str, tuple[int, ...], list[str | FileLine]]:
+def _iso_geometry(path: Path, size: int, system: str, read_at) -> tuple[str, tuple[int, ...], list[str | FileLine]]:
     if system == 'ps2' and size < 700_000_000:
         raise ValueError('PS2 ISO below DVD threshold; use the original BIN/CUE for CD media')
-    with path.open('rb') as disc:
-        for width in ((2048, 2352, 2336) if system == 'psx' else (2048,)):
-            if size % width or size < 17 * width:
+    for width in ((2048, 2352, 2336) if system == 'psx' else (2048,)):
+        if size % width or size < 17 * width:
+            continue
+        sector = read_at(16 * width, 32)
+        if len(sector) != 32:
+            continue
+        offset = 0
+        if width == 2352:
+            if sector[:12] != b'\x00' + b'\xff' * 10 + b'\x00' or sector[15] not in (1, 2):
                 continue
-            disc.seek(16 * width)
-            sector = disc.read(32)
-            offset = 0
-            if width == 2352:
-                if sector[:12] != b'\x00' + b'\xff' * 10 + b'\x00' or sector[15] not in (1, 2):
-                    continue
-                mode = f'MODE{sector[15]}/2352'
-                offset = 16 if sector[15] == 1 else 24
-            elif width == 2336:
-                mode = 'MODE2/2336'
-                offset = 8  # XA subheader
-            sig = sector[offset:offset+7]
-            if sig != b'\x00BEA01\x01' and not (sig[1:] == b'CD001\x01' and sig[0] in range(4)):
-                continue
-            # Do not let chdman guess between raw and cooked sectors from length
-            # divisibility: some raw CDs are *also* a multiple of 2048 bytes.
-            sheet = [] if width == 2048 else [FileLine(path, 'FILE ', ' BINARY'), f'TRACK 01 {mode}', 'INDEX 01 00:00:00']
-            return default_mode(system, '.iso'), (size // width,), sheet
+            mode = f'MODE{sector[15]}/2352'
+            offset = 16 if sector[15] == 1 else 24
+        elif width == 2336:
+            mode = 'MODE2/2336'
+            offset = 8  # XA subheader
+        sig = sector[offset:offset+7]
+        if sig != b'\x00BEA01\x01' and not (sig[1:] == b'CD001\x01' and sig[0] in range(4)):
+            continue
+        # Some raw CDs are also a multiple of 2048 bytes. Supply their real geometry.
+        sheet = [] if width == 2048 else [FileLine(path, 'FILE ', ' BINARY'), f'TRACK 01 {mode}', 'INDEX 01 00:00:00']
+        return default_mode(system, '.iso'), (size // width,), sheet
     raise ValueError('Missing ISO 9660/UDF volume descriptor or incomplete sectors')
+
+
+def _geometry(ext, tracks, lines, names, sizes):
+    for track in tracks:
+        track.path = names[track.path]
+    lines = [replace(line, path=names[line.path]) if isinstance(line, FileLine) else line for line in lines]
+    frames = _gdi_frames(tracks, sizes, lines) if ext == '.gdi' else _cue_frames(tracks, sizes)
+    return tuple(frames), lines
+
+
+def _local_zip(path: Path, system: str) -> bool:
+    return (path.suffix.lower() == '.zip' and not path.name.startswith('.') and not _firmware_name(path)
+            and bool({'.iso', '.cue', '.gdi', '.gcm'}.intersection(FORMATS.get(system, ()))))
+
+
+def _archived_disc(source: Path, system: str, stamp: _STAMP) -> Game:
+    with disc_zip.catalog(source, stamp) as (members, prefix):
+        primaries = [m for m in members if is_input_name(m.path, system)]
+        if len(primaries) != 1:
+            raise ValueError(f'ZIP must contain exactly one supported {SYSTEM_LABELS[system]} disc; found {len(primaries)}')
+        entry = primaries[0]
+        ext = entry.path.suffix.lower()
+        mode = default_mode(system, ext)
+        sizes = {m.path: m.size for m in members}
+        if ext in ('.cue', '.gdi'):
+            if entry.size > 1 << 20:
+                raise ValueError('ZIP disc descriptor exceeds 1 MiB')
+            by_key = {unicodedata.normalize('NFC', p.as_posix()).casefold(): p for p in sizes}
+            missing = None
+            for tracks, lines in _decode_descriptor(entry.path, prefix(entry, entry.size)):
+                names = {}
+                for ref in dict.fromkeys(t.path for t in tracks):
+                    key = unicodedata.normalize('NFC', (entry.path.parent / ref).as_posix()).casefold()
+                    if key not in by_key:
+                        missing = ref
+                        break
+                    names[ref] = by_key[key]
+                else:
+                    break
+            else:
+                raise ValueError(f'Missing ZIP track: {missing}' if missing else 'Unknown ZIP descriptor encoding')
+            if set(sizes) != {entry.path, *names.values()}:
+                raise ValueError('ZIP includes unreferenced files; repack only the sheet and its tracks')
+            frames, lines = _geometry(ext, tracks, lines, names, sizes)
+            if sum(frames) * 2448 > disc_zip.MAX_BYTES:
+                raise ValueError('ZIP disc track geometry expands beyond 16 GiB')
+        else:
+            if len(members) != 1:
+                raise ValueError('ZIP includes extra files; repack only the disc image')
+            frames, lines = (), []
+            if mode == 'rvz':
+                from . import rvz
+                header = prefix(entry, 0x440)
+                gc, wii = header[0x1c:0x20] == rvz._GC, header[0x18:0x1c] == rvz._WII
+                if (not 0x2460 <= entry.size <= rvz._MAX_DISC or gc == wii or gc != (system == 'gc')
+                        or header[0x200:0x204] == b'NKIT'):
+                    raise ValueError(f'Expected a raw {SYSTEM_LABELS[system]} disc header in ZIP')
+            elif mode == 'xiso':
+                from . import xiso
+                # The XGD1 descriptor is ~387 MiB into the deflated stream. Do not
+                # expand that during discovery; full XDVDFS validation is mandatory in scratch.
+                if entry.size % 2048 or entry.size < xiso._XGD1 + xiso._GAME_BYTES:
+                    raise ValueError('ZIP does not contain a complete original Xbox XGD1 image')
+                if prefix(entry, xiso._DESCRIPTOR + len(xiso._MAGIC)).endswith(xiso._MAGIC):
+                    raise ValueError('ZIP already contains a standalone XISO; nothing to convert')
+            else:
+                header = prefix(entry, 16 * (2352 if system == 'psx' else 2048) + 32)
+                mode, frames, lines = _iso_geometry(entry.path, entry.size, system,
+                                                     lambda pos, length: header[pos:pos + length])
+    return Game(source, system, (source,), sum(sizes.values()), mode, frames, tuple(lines), (stamp,),
+                disc_zip.Archive(entry.path, members))
 
 
 def inspect(source: Path, system: str, *, fresh: bool = True) -> Game:
@@ -463,12 +544,15 @@ def inspect(source: Path, system: str, *, fresh: bool = True) -> Game:
 def _inspect(source: Path, system: str, fresh: bool, index: _DirectoryIndex) -> Game:
     system = SYSTEMS.get(system.lower(), '')
     ext = source.suffix.lower()
-    if not is_input_name(source, system):
+    zipped = _local_zip(source, system)
+    if not zipped and not is_input_name(source, system):
         raise ValueError(f'Unsupported system/format: {system}/{ext}')
     if source.is_symlink() or source.resolve(strict=True) != source:
         raise ValueError(f'Symlink in source path: {source}')
     safe_relative_name(source.name)
     stamps = {source: _stamp(source, fresh)}
+    if zipped:
+        return _archived_disc(source, system, stamps[source])
     if system in _SINGLE_MODES:
         mode = _SINGLE_MODES[system]
         if mode == 'rvz':
@@ -482,7 +566,11 @@ def _inspect(source: Path, system: str, fresh: bool, index: _DirectoryIndex) -> 
         validate(source, system)
         frames, lines = (), []
     elif ext == '.iso':
-        mode, frames, lines = _iso(source, stamps[source][2], system)
+        with source.open('rb') as disc:
+            def read_at(pos, length):
+                disc.seek(pos)
+                return disc.read(length)
+            mode, frames, lines = _iso_geometry(source, stamps[source][2], system, read_at)
     else:
         failure: ValueError | None = None
         for tracks, lines in _descriptors(source):
@@ -496,11 +584,7 @@ def _inspect(source: Path, system: str, fresh: bool, index: _DirectoryIndex) -> 
             raise failure or ValueError(f'Unknown descriptor encoding: {source}')
         for path in names.values():
             stamps[path] = _stamp(path, fresh)
-        for t in tracks:
-            t.path = names[t.path]
-        lines = [replace(line, path=names[line.path]) if isinstance(line, FileLine) else line for line in lines]
-        sizes = {p: stamp[2] for p, stamp in stamps.items()}
-        frames = tuple(_gdi_frames(tracks, sizes, lines) if ext == '.gdi' else _cue_frames(tracks, sizes))
+        frames, lines = _geometry(ext, tracks, lines, names, {p: stamp[2] for p, stamp in stamps.items()})
         mode = 'createcd'
     game = Game(source, system, tuple(stamps), sum(s[2] for s in stamps.values()), mode, frames,
                 tuple(lines), tuple(stamps.values()))
@@ -536,13 +620,13 @@ def scan(root: Path) -> tuple[list[Game], list[Issue]]:
             ext = path.suffix.lower()
             if name.startswith('.') or not system or _firmware_name(path):
                 continue
-            if ext in _ARCHIVES:
+            if ext in _ARCHIVES and not _local_zip(path, system):
                 if system in archive7z.FORMATS and ext in ('.7z', '.zip'):
                     continue  # Single-ROM archives are already usable; never recompress them.
                 issues.append(Issue(path, 'Needs unpacking before conversion', 'needs_unpacking'))
             elif ext in _PARTIAL:
                 issues.append(Issue(path, 'Incomplete transfer', 'active_transfer'))
-            elif is_input_name(path, system):
+            elif _local_zip(path, system) or is_input_name(path, system):
                 try:
                     games.append(_inspect(path, system, True, index))
                 except (OSError, ValueError) as exc:
