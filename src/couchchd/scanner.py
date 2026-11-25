@@ -11,13 +11,46 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PureWindowsPath
 
-SYSTEMS = {name: name for name in ('psx', 'segacd', 'saturn', 'dreamcast', 'ps2', 'psp')}
-SYSTEMS.update(ps1='psx', megacd='segacd')
-FORMATS = {'psx': {'.cue', '.iso'}, 'segacd': {'.cue'}, 'saturn': {'.cue'},
-           'dreamcast': {'.cue', '.gdi'}, 'ps2': {'.iso', '.cue'}, 'psp': {'.iso'}}
+from . import archive7z
+from .output_formats import SUFFIX_BY_MODE
+
+
+SYSTEM_LABELS = {
+    'psx': 'PlayStation', 'ps2': 'PlayStation 2', 'psp': 'PlayStation Portable',
+    'segacd': 'Sega CD', 'saturn': 'Sega Saturn', 'dreamcast': 'Dreamcast',
+    'pcenginecd': 'PC Engine CD / TurboGrafx-CD', 'pcfx': 'PC-FX',
+    'neogeocd': 'Neo Geo CD', '3do': '3DO', 'amigacd32': 'Amiga CD32', 'amigacdtv': 'Amiga CDTV',
+    'gc': 'GameCube', 'wii': 'Wii', 'xbox': 'Original Xbox', '3ds': 'Nintendo 3DS',
+    'nes': 'NES / Famicom', 'snes': 'SNES / Super Famicom', 'gb': 'Game Boy', 'gbc': 'Game Boy Color',
+    'gba': 'Game Boy Advance', 'n64': 'Nintendo 64', 'megadrive': 'Mega Drive / Genesis',
+    'mastersystem': 'Master System', 'gamegear': 'Game Gear',
+}
+SYSTEMS = {
+    **{name: name for name in SYSTEM_LABELS}, 'ps1': 'psx', 'megacd': 'segacd', 'gamecube': 'gc',
+    'ngc': 'gc', 'n3ds': '3ds', 'xboxclassic': 'xbox', 'pcecd': 'pcenginecd', 'tgcd': 'pcenginecd',
+    'tg-cd': 'pcenginecd', 'tg16cd': 'pcenginecd', 'turbografxcd': 'pcenginecd', 'turbografx-cd': 'pcenginecd',
+    'neocd': 'neogeocd', 'neogeocdjp': 'neogeocd', 'cd32': 'amigacd32', 'cdtv': 'amigacdtv',
+    'famicom': 'nes', 'fc': 'nes', 'sfc': 'snes', 'superfamicom': 'snes', 'snesna': 'snes',
+    'genesis': 'megadrive', 'sms': 'mastersystem', 'gg': 'gamegear', 'gameboy': 'gb',
+    'gameboycolor': 'gbc', 'gameboyadvance': 'gba',
+}
+# These additional systems have *CD* cores advertising cue + chd (libretro-core-info:
+# mednafen_pce_fast, mednafen_pcfx, neocd, opera and puae). Not their floppy,
+# HuCard, BIOS, hard disk or arcade counterparts.
+FORMATS = {system: frozenset({'.cue'}) for system in (
+    'segacd', 'saturn', 'pcenginecd', 'pcfx', 'neogeocd', '3do', 'amigacd32', 'amigacdtv')}
+FORMATS.update({
+    'psx': {'.cue', '.iso'}, 'ps2': {'.iso', '.cue'}, 'psp': {'.iso'},
+    'dreamcast': {'.cue', '.gdi'}, 'gc': {'.iso', '.gcm'}, 'wii': {'.iso'},
+    'xbox': {'.iso'}, '3ds': {'.3ds', '.cci'}, **archive7z.FORMATS,
+})
+_SINGLE_MODES = {'gc': 'rvz', 'wii': 'rvz', 'xbox': 'xiso', '3ds': 'trim3ds',
+                 **dict.fromkeys(archive7z.FORMATS, '7z')}
 _ARCHIVES = {'.zip', '.7z', '.rar', '.ecm', '.ape', '.flac'}
 _PARTIAL = {'.part', '.crdownload', '.tmp'}
-_PRIVATE = {'_couchchd_backup', '.couchchd_tmp', '.chd_discs'}
+_EXCLUDED_DIRS = {'_couchchd_backup', '.couchchd_tmp', '.chd_discs', 'bios', 'firmware',
+                  'arcade', 'fbneo', 'fba', 'fba_libretro', 'fbn', 'finalburnneo', 'neogeo',
+                  'naomi', 'naomi2', 'atomiswave'}
 _WIDTHS = {'AUDIO': 2352, 'MODE1/2048': 2048, 'MODE1/2352': 2352,
            'MODE2/2336': 2336, 'MODE2/2352': 2352, 'MODE2/2048': 2048,
            'MODE2/2324': 2324}
@@ -59,6 +92,90 @@ class Game:
                 raise ValueError(f'Source changed since scan: {item}')
 
 
+def _excluded_directory(name: str) -> bool:
+    folded = name.casefold()
+    return folded in _EXCLUDED_DIRS or re.fullmatch(r'mame(?:\d.*|[-_].*)?', folded) is not None
+
+
+def visible_directory(name: str) -> bool:
+    return not name.startswith('.') and not _excluded_directory(name)
+
+
+def library_root_allowed(root: Path) -> bool:
+    # Selecting bios/nes (or a system inside the quarantine) directly must
+    # not bypass exclusions. Hidden ancestors such as ~/.local are fine.
+    return not root.name.startswith('.') and not any(map(_excluded_directory, root.parts))
+
+
+def _system_directory(root: Path, directory: Path) -> Path | None:
+    if not directory.is_relative_to(root):
+        return None
+    parts = directory.relative_to(root).parts
+    if not visible_directory(root.name) or not all(map(visible_directory, parts)):
+        return None
+    folder = root
+    if root.name.casefold() in SYSTEMS:
+        return root
+    for part in parts:
+        folder /= part
+        if part.casefold() in SYSTEMS:
+            return folder
+    return None
+
+
+def system_folder(root: Path, path: Path) -> Path | None:
+    """First matching system at or below root. A nested title is not another library."""
+    return _system_directory(root, path.parent)
+
+
+def library_system(root: Path, path: Path) -> str:
+    folder = system_folder(root, path)
+    return SYSTEMS[folder.name.casefold()] if folder is not None else ''
+
+
+def _firmware_name(path: Path) -> bool:
+    # Firmware bundles may live beside games (notably Neo Geo CD's neocdz.zip).
+    stem = path.stem.casefold()
+    return ((stem in {'neogeo', 'neocd', 'neocdz'} and path.suffix.lower() in _ARCHIVES)
+            or re.search(r'(?:^|[\W_])(?:bios|firmware|ipl)(?:$|[\W_])', stem) is not None)
+
+
+def is_input_name(path: Path, system: str) -> bool:
+    name = path.name.casefold()
+    return (not name.startswith('.') and not name.endswith(('.trim.3ds', '.xiso.iso'))
+            and path.suffix.lower() in FORMATS.get(system, ()) and not _firmware_name(path))
+
+
+def default_mode(system: str, ext: str) -> str:
+    if system in _SINGLE_MODES:
+        return _SINGLE_MODES[system]
+    return 'createdvd' if system in ('psp', 'ps2') and ext.lower() == '.iso' else 'createcd'
+
+
+def output_path(source: Path, mode: str) -> Path:
+    return source.with_suffix(SUFFIX_BY_MODE[mode])
+
+
+def output_mode(game: Game, psp_format: str) -> str:
+    if psp_format not in ('chd', 'cso'):
+        raise ValueError(f'Unknown PSP format: {psp_format}')
+    if game.system != 'psp':
+        return game.mode
+    return 'cso' if psp_format == 'cso' else 'createdvd'
+
+
+def select_format(game: Game, psp_format: str) -> Game:
+    mode = output_mode(game, psp_format)
+    if mode == game.mode:
+        return game
+    if mode == 'cso':
+        from . import cso
+        game.assert_unchanged()
+        cso.validate(game.source, game.system)
+        game.assert_unchanged()
+    return replace(game, mode=mode)
+
+
 def _stamp(path: Path, fresh: bool) -> _STAMP:
     s = path.lstat()
     if not stat.S_ISREG(s.st_mode) or not s.st_size:
@@ -87,6 +204,8 @@ def safe_relative_name(name: str, *, descriptor: bool = False) -> Path:
 
 def _relative(name: str) -> Path:
     path = safe_relative_name(name, descriptor=True)
+    if path.name.startswith('.') or not all(map(visible_directory, path.parts[:-1])) or _firmware_name(path):
+        raise ValueError(f'Unsafe firmware, hidden or excluded track path: {name}')
     if path.suffix.lower() not in {'.bin', '.raw', '.img'}:
         raise ValueError(f'Unsupported track file: {name}')
     return path
@@ -333,24 +452,36 @@ def _iso(path: Path, size: int, system: str) -> tuple[str, tuple[int, ...], list
             # Do not let chdman guess between raw and cooked sectors from length
             # divisibility: some raw CDs are *also* a multiple of 2048 bytes.
             sheet = [] if width == 2048 else [FileLine(path, 'FILE ', ' BINARY'), f'TRACK 01 {mode}', 'INDEX 01 00:00:00']
-            return ('createcd' if system == 'psx' else 'createdvd'), (size // width,), sheet
+            return default_mode(system, '.iso'), (size // width,), sheet
     raise ValueError('Missing ISO 9660/UDF volume descriptor or incomplete sectors')
 
 
 def inspect(source: Path, system: str, *, fresh: bool = True) -> Game:
-    return _inspect(source, system, fresh, {})
+    return _inspect(source.parent.resolve(strict=True) / source.name, system, fresh, {})
 
 
 def _inspect(source: Path, system: str, fresh: bool, index: _DirectoryIndex) -> Game:
     system = SYSTEMS.get(system.lower(), '')
     ext = source.suffix.lower()
-    if ext not in FORMATS.get(system, set()):
+    if not is_input_name(source, system):
         raise ValueError(f'Unsupported system/format: {system}/{ext}')
-    if source.is_symlink():
-        raise ValueError(f'Symlink source: {source}')
-    source = source.resolve(strict=True)
+    if source.is_symlink() or source.resolve(strict=True) != source:
+        raise ValueError(f'Symlink in source path: {source}')
+    safe_relative_name(source.name)
     stamps = {source: _stamp(source, fresh)}
-    if ext == '.iso':
+    if system in _SINGLE_MODES:
+        mode = _SINGLE_MODES[system]
+        if mode == 'rvz':
+            from .rvz import validate
+        elif mode == 'xiso':
+            from .xiso import validate
+        elif mode == 'trim3ds':
+            from .trim3ds import validate
+        else:
+            validate = archive7z.validate
+        validate(source, system)
+        frames, lines = (), []
+    elif ext == '.iso':
         mode, frames, lines = _iso(source, stamps[source][2], system)
     else:
         failure: ValueError | None = None
@@ -384,20 +515,34 @@ def scan(root: Path) -> tuple[list[Game], list[Issue]]:
     root = root.resolve(strict=True)
     if not root.is_dir():
         raise NotADirectoryError(root)
+    if not library_root_allowed(root):
+        return games, issues
     for basedir, dirs, names in os.walk(root, onerror=lambda e: issues.append(Issue(Path(e.filename), str(e)))):
         base = Path(basedir)
-        dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d.lower() not in _PRIVATE and not (base/d).is_symlink())
-        system = next((SYSTEMS[p.lower()] for p in reversed((root.name, *base.relative_to(root).parts)) if p.lower() in SYSTEMS), None)
+        children = []
+        for d in sorted(d for d in dirs if visible_directory(d)):
+            if (base / d).is_symlink():
+                if d.casefold() in SYSTEMS:
+                    issues.append(Issue(base / d, 'Linked system folder skipped; select its real location to scan.',
+                                        'linked_folder'))
+            else:
+                children.append(d)
+        dirs[:] = children
+        # Resolve the library once per directory, rather than per file in large ROM sets.
+        folder = _system_directory(root, base)
+        system = SYSTEMS[folder.name.casefold()] if folder is not None else ''
         for name in sorted(names):
             path = base / name
             ext = path.suffix.lower()
-            if name.startswith('.'):
+            if name.startswith('.') or not system or _firmware_name(path):
                 continue
             if ext in _ARCHIVES:
+                if system in archive7z.FORMATS and ext in ('.7z', '.zip'):
+                    continue  # Single-ROM archives are already usable; never recompress them.
                 issues.append(Issue(path, 'Needs unpacking before conversion', 'needs_unpacking'))
             elif ext in _PARTIAL:
                 issues.append(Issue(path, 'Incomplete transfer', 'active_transfer'))
-            elif system and ext in ('.iso', '.gdi', '.cue'):
+            elif is_input_name(path, system):
                 try:
                     games.append(_inspect(path, system, True, index))
                 except (OSError, ValueError) as exc:

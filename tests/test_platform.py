@@ -88,10 +88,13 @@ def test_pi_systems_and_psp_floor(monkeypatch, version, enabled):
         assert args == ['/usr/bin/PPSSPPSDL', '--version']
         return subprocess.CompletedProcess(args, 0, stdout=version)
     monkeypatch.setattr(profiles.subprocess, 'run', probe)
-    assert profiles.default_systems() == {'psx', 'segacd', 'saturn', 'dreamcast'} | ({'psp'} if enabled else set())
+    supported = set(scanner.FORMATS)
+    assert {'nes', '3do', '3ds', 'gc', 'wii', 'xbox', 'pcenginecd', 'neogeocd'} <= supported
+    assert profiles.default_systems() == supported - ({'ps2'} if enabled else {'ps2', 'psp'})
+    assert profiles.default_systems('cso') == supported - {'ps2'}
     monkeypatch.setattr(profiles, 'is_pi', lambda: False)
     monkeypatch.setattr(profiles, 'is_recalbox', lambda: False)
-    assert len(profiles.default_systems()) == 6
+    assert profiles.default_systems() == supported
 
 
 _CUE = b'FILE "tracks/T01.BIN" BINARY\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n'
@@ -125,6 +128,101 @@ def test_mounted_ingest_one_disc_at_a_time_and_early_close(tmp_path):
         assert output2 == Path('psx/Nested/Disc B (日本).chd')
     assert not list(scratch.iterdir())
     assert a.read_bytes() == b.read_bytes() == _CUE and track.stat().st_size == 2352
+
+
+@pytest.mark.parametrize('folder,system', [
+    ('tg-cd', 'pcenginecd'), ('pcenginecd', 'pcenginecd'), ('NeoGeoCDJP', 'neogeocd'),
+    ('3DO', '3do'), ('PCFX', 'pcfx'), ('CD32', 'amigacd32'), ('amigacdtv', 'amigacdtv'),
+])
+def test_new_cd_libraries_require_descriptors_and_preserve_tracks(tmp_path, folder, system):
+    root = tmp_path.resolve() / 'library'
+    cue, track = disc(root / folder / 'Title', 'Disc')
+    # Even a plausible ISO 9660 volume cannot establish the CD track layout.
+    iso = put(cue.with_suffix('.iso'), bytes(32768) + b'\x01CD001\x01' + bytes(2041))
+    with pytest.raises(ValueError, match='Unsupported'):
+        scanner.inspect(iso, system, fresh=False)
+    games, issues = scanner.scan(root)
+    assert not issues and len(games) == 1
+    game, = games
+    assert (game.system, game.mode, game.files, game.frames) == (system, 'createcd', (cue, track), (1,))
+
+
+def test_discovery_and_mounted_ingest_agree_on_cartridges_and_exclusions(tmp_path):
+    root, scratch = tmp_path.resolve() / 'library', tmp_path / 'scratch'
+    rom = b'NES\x1a' + bytes([1]) + bytes(11 + 16384)
+    source = put(root / 'Famicom/gc/Game.v1.NES', rom)
+    for relative in (
+        'Famicom/Game.7Z', 'Famicom/Game.zip', 'Famicom/gc/disc.iso',
+        'Famicom/BIOS/Genuine.nes', 'Famicom/[BIOS] Example.nes', 'Famicom/Firmware.nes',
+        'arcade/nes/Game.nes', 'mame2003/nes/Game.nes', 'bios/nes/Game.nes',
+        '_couchchd_backup/nes/Game.nes', '3ds/Finished.TRIM.3DS', 'xbox/Finished.XISO.ISO',
+        'neogeocd/neocdz.zip',
+    ):
+        put(root / relative, rom)
+    bad = put(root / 'nes/Not a cartridge.nes', b'PK\x03\x04' + rom)
+    # Give the invalid image a stable timestamp, too; its rejection is based on content.
+    old = time.time() - 60
+    for path in root.rglob('*'):
+        if path.is_file():
+            os.utime(path, (old, old))
+    games, issues = scanner.scan(root)
+    assert [(g.source, g.system, g.mode) for g in games] == [(source, 'nes', '7z')]
+    assert [(i.path, i.category) for i in issues] == [(bad, 'invalid')]
+    assert scanner.scan(root / 'bios/nes') == ([], [])
+    bad.unlink()
+    with closing(cloud_ingest.games(str(root), scratch, set(scanner.FORMATS), threading.Event())) as stream:
+        staged, relative, key = next(stream)
+        assert (relative, key, staged.mode) == (Path('nes/gc/Game.v1.7z'), str(source), '7z')
+        assert staged.source.read_bytes() == source.read_bytes() == rom
+        assert list(stream) == [] and not staged.source.exists()
+
+
+def test_linked_system_is_reported_without_traversal(tmp_path):
+    root = tmp_path.resolve() / 'library'
+    external = tmp_path.resolve() / 'actual/pcfx'
+    disc(external, 'Game')
+    root.mkdir()
+    link = root / 'pcfx'
+    try:
+        link.symlink_to(external, target_is_directory=True)
+    except OSError:
+        pytest.skip('Directory symlinks unavailable')
+    games, issues = scanner.scan(root)
+    assert not games and [(i.path, i.category) for i in issues] == [(link, 'linked_folder')]
+    assert [g.source for g in scanner.scan(external)[0]] == [external / 'Game.cue']
+
+
+def test_selected_psp_format_survives_separate_network_staging(tmp_path):
+    root = tmp_path.resolve() / 'roms'
+    source = put(root / 'psp/Title.v1.ISO', bytes(32768) + b'\x01CD001\x01' + bytes(2041))
+    old = time.time() - 60
+    os.utime(source, (old, old))
+    games, issues = scanner.scan(root)
+    assert not issues and len(games) == 1 and games[0].mode == 'createdvd'
+    selected = scanner.select_format(games[0], 'cso')
+    assert selected.frames == (17,) and scanner.output_path(source, selected.mode).name == 'Title.v1.cso'
+    with cloud_ingest.stage(selected, tmp_path / 'scratch') as staged:
+        assert staged.mode == 'cso' and staged.source.name == source.name
+        assert staged.source != source and staged.source.read_bytes() == source.read_bytes()
+    assert scanner.select_format(selected, 'chd') == games[0] and not staged.source.exists()
+
+
+@pytest.mark.parametrize('folder,suffix,mode,output_suffix', [
+    ('GameCube', '.gcm', 'rvz', '.rvz'), ('Wii', '.iso', 'rvz', '.rvz'),
+    ('Xbox', '.iso', 'xiso', '.xiso.iso'), ('n3ds', '.cci', 'trim3ds', '.trim.3ds'),
+])
+def test_single_image_routing_requires_a_stable_recognized_image(tmp_path, folder, suffix, mode, output_suffix):
+    root = tmp_path.resolve()
+    source = put(root / folder / ('title.revision' + suffix), b'not a console image')
+    system = scanner.library_system(root, source)
+    assert scanner.default_mode(system, suffix) == mode
+    assert scanner.output_path(source, mode).name == 'title.revision' + output_suffix
+    games, issues = scanner.scan(root)
+    assert not games and [(i.path, i.category) for i in issues] == [(source, 'active_transfer')]
+    old = time.time() - 60
+    os.utime(source, (old, old))
+    games, issues = scanner.scan(root)
+    assert not games and [(i.path, i.category) for i in issues] == [(source, 'invalid')]
 
 
 def test_stage_fails_closed_on_space_copy_mismatch_or_changed_source(tmp_path, monkeypatch):
@@ -197,6 +295,21 @@ def test_cloud_pulls_only_referenced_tracks_then_cleans_up(tmp_path, monkeypatch
         assert list(queue) == []
     assert actions == ['PS1/One.cue', 'PS1/Tracks/t01.bin', 'PS1/Two.cue', 'PS1/Tracks/t01.bin']
     assert not list(scratch.iterdir())
+
+
+def test_cloud_keeps_source_names_and_does_not_download_outputs_or_firmware(tmp_path, monkeypatch):
+    rom = b'NES\x1a' + bytes([1]) + bytes(11 + 16384)
+    objects = {'Famicom/one/Title.1.NES': rom, '3ds/Done.trim.3DS': b'output',
+               'xbox/Done.XISO.iso': b'output', 'Famicom/one/Title.1.7z': b'archive',
+               'Famicom/one/[BIOS] Boot.nes': rom, 'arcade/nes/one.nes': rom,
+               'bios/Famicom/one.nes': rom, 'Famicom/BIOS/one.nes': rom}
+    actions = remote_transport(monkeypatch, objects)
+    with closing(cloud_ingest.games('vault:', tmp_path, set(scanner.FORMATS), threading.Event())) as queue:
+        game, output, key = next(queue)
+        assert (key, output, game.source.name, game.mode) == (
+            'vault:Famicom/one/Title.1.NES', Path('nes/one/Title.1.7z'), 'Title.1.NES', '7z')
+        assert list(queue) == [] and not game.source.exists()
+    assert actions == ['Famicom/one/Title.1.NES']
 
 
 @pytest.mark.parametrize('ref', ['../private.bin', '/etc/private.bin', 'C:\\private.bin', 'absent.bin'])

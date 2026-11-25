@@ -24,7 +24,7 @@ from .telemetry import ItemProgress
 
 
 _REMOTE_NAME = re.compile(r'[^:/\\\x00-\x1f\x7f]+:\Z')
-_NETWORK = {'cifs', 'sshfs', 'nfs', '9p', 'ceph', 'afs', 'fuse.rclone', 'davfs', 'davfs2'}
+NETWORK = frozenset({'cifs', 'sshfs', 'nfs', '9p', 'ceph', 'afs', 'fuse.rclone', 'davfs', 'davfs2'})
 
 
 def remotes() -> list[str]:
@@ -41,21 +41,19 @@ def remotes() -> list[str]:
 
 
 def _visible(path: Path) -> bool:
-    return not any(p.startswith('.') or p.casefold() == '_couchchd_backup' for p in path.parts)
+    return not path.name.startswith('.') and all(map(scanner.visible_directory, path.parts[:-1]))
 
 
-def _destination(path: Path, root_system: str | None, systems: set[str]) -> tuple[str, Path] | None:
-    system, start = root_system, 0
-    # The first system directory under the selected root defines the library;
-    # a game's title/subdirectory can itself happen to be another system name.
-    if system is None:
-        for i, part in enumerate(path.parts[:-1]):
-            if system := scanner.SYSTEMS.get(part.casefold()):
-                start = i + 1
-                break
-    if system not in systems or path.suffix.lower() not in scanner.FORMATS[system]:
+def _destination(path: Path, root: Path, systems: set[str]) -> tuple[str, Path] | None:
+    source = root / path
+    folder = scanner.system_folder(root, source)
+    if folder is None:
         return None
-    return system, (Path(system, *path.parts[start:])).with_suffix('.chd')
+    system = scanner.SYSTEMS[folder.name.casefold()]
+    if system not in systems or not scanner.is_input_name(path, system):
+        return None
+    relative = Path(system) / source.relative_to(folder)
+    return system, scanner.output_path(relative, scanner.default_mode(system, path.suffix))
 
 
 def _cancelled(cancel: threading.Event | None) -> None:
@@ -73,7 +71,7 @@ def _workspace(scratch: Path, protected: Path | None = None) -> Iterator[Path]:
     scratch = scratch.resolve()
     if protected is not None and scratch.is_relative_to(protected.resolve()):
         raise ValueError('Scratch must be outside the selected source directory')
-    if hardware.fs_type(scratch) in _NETWORK:
+    if hardware.fs_type(scratch) in NETWORK:
         raise ValueError('Choose a local drive for scratch, not a network mount')
     scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
     if os.name == 'posix':
@@ -118,11 +116,12 @@ def stage(game: scanner.Game, scratch: Path, *, cancel: threading.Event | None =
                 if _identity(os.fstat(src.fileno())) != identity:
                     raise ValueError(f'Source changed before staging: {path}')
                 expected = _stream_digest(src, buffer, cancel, dst)
-            with destination.open('rb') as staged:
-                if _stream_digest(staged, buffer, cancel) != expected:
+            with destination.open('rb') as copy:
+                if _stream_digest(copy, buffer, cancel) != expected:
                     raise ValueError(f'Staged content does not match the source: {path}')
         game.assert_unchanged()
-        yield scanner.inspect(work / source.name, game.system, fresh=False)
+        staged = scanner.inspect(work / source.name, game.system, fresh=False)
+        yield scanner.select_format(staged, 'cso' if game.mode == 'cso' else 'chd')
 
 
 @contextmanager
@@ -143,7 +142,8 @@ def _preparing(on_item, key, name, system):
 def _mounted(root: Path, scratch: Path, systems: set[str], cancel: threading.Event, on_item):
     if scratch.resolve().is_relative_to(root):
         raise ValueError('Scratch must be outside the selected source directory')
-    root_system = scanner.SYSTEMS.get(root.name.casefold())
+    if not scanner.library_root_allowed(root):
+        return
 
     def raise_error(error: OSError) -> None:
         raise error
@@ -151,14 +151,14 @@ def _mounted(root: Path, scratch: Path, systems: set[str], cancel: threading.Eve
     for directory, dirs, names in os.walk(root, onerror=raise_error):
         _cancelled(cancel)
         directory = Path(directory)
-        dirs[:] = sorted(d for d in dirs if _visible(Path(d)) and not (directory / d).is_symlink())
+        dirs[:] = sorted(d for d in dirs if scanner.visible_directory(d) and not (directory / d).is_symlink())
         for name in sorted(names):
             _cancelled(cancel)
             source = directory / name
             relative = source.relative_to(root)
             if not _visible(relative) or source.is_symlink():
                 continue
-            route = _destination(relative, root_system, systems)
+            route = _destination(relative, root, systems)
             if route is None:
                 continue
             system, output = route
@@ -223,7 +223,9 @@ def _cloud(remote: str, scratch: Path, systems: set[str], cancel: threading.Even
         raise ValueError(f'Not a mounted directory or configured rclone remote: {remote}')
     if prefix.strip('/'):
         scanner.safe_relative_name(prefix.strip('/'))
-    root_system = scanner.SYSTEMS.get((Path(prefix.rstrip('/')).name or name).casefold())
+    root = Path(prefix.rstrip('/') or name)
+    if not scanner.library_root_allowed(root):
+        return
     index = _listing(remote, cancel)
     remote_base = remote + ('' if remote.endswith((':', '/')) else '/')
 
@@ -238,7 +240,7 @@ def _cloud(remote: str, scratch: Path, systems: set[str], cancel: threading.Even
     for objects in index.values():
         _cancelled(cancel)
         obj = objects[0]
-        route = _destination(obj.path, root_system, systems)
+        route = _destination(obj.path, root, systems)
         if route is None or time.time() - obj.modified < 10:
             continue
         key = remote_base + obj.path.as_posix()
@@ -274,7 +276,7 @@ def _cloud(remote: str, scratch: Path, systems: set[str], cancel: threading.Even
 
 def games(remote: str, scratch: Path, systems: set[str], cancel: threading.Event,
           on_item=None) -> Iterator[tuple[scanner.Game, Path, str]]:
-    """Yield a staged game, its library-relative .chd destination and original source key.
+    """Yield a staged game, its default library-relative output and original source key.
 
     Consume the game before advancing the iterator. Close the iterator on early
     exit to release its current disc's scratch space immediately.

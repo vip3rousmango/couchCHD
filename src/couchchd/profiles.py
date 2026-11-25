@@ -11,7 +11,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import hardware
+from . import hardware, scanner
 
 
 _RECALBOX = Path('/recalbox/share')
@@ -135,11 +135,13 @@ def _supports_psp_chd() -> bool:
     return bool(match and (int(match[1]), int(match[2])) >= (1, 17))
 
 
-def default_systems() -> set[str]:
-    enabled = {'psx', 'segacd', 'saturn', 'dreamcast', 'ps2', 'psp'}
+def default_systems(psp_format: str = 'chd') -> set[str]:
+    if psp_format not in ('chd', 'cso'):
+        raise ValueError(f'Unknown PSP format: {psp_format}')
+    enabled = set(scanner.FORMATS)
     pi = is_pi()
     if pi:
         enabled.remove('ps2')
-    if (pi or is_recalbox()) and not _supports_psp_chd():
+    if psp_format == 'chd' and (pi or is_recalbox()) and not _supports_psp_chd():
         enabled.remove('psp')
     return enabled
