@@ -104,8 +104,11 @@ paths = {Path(interp).resolve()}
 for name, path in re.findall(r'^\s*(\S+) => (/\S+) \(', text, re.M):
     shutil.copy2(path, stage / 'lib' / name)
     paths.add(Path(path).resolve())
-for lib in re.findall(r'(/[^\s()]+\.a)(?:\(|\s|$)', Path('link.map').read_text(), re.M):
-    p = Path(lib).resolve()
+# GNU ld's LOAD records give the complete archive name, relative to Ninja's
+# build directory or absolute for system libraries. Member names elsewhere
+# in the map are not paths (e.g. Source/Core/AudioCommon/libaudiocommon.a).
+for lib in re.findall(r'^LOAD ([^\n]+\.a)$', Path('link.map').read_text(), re.M):
+    p = (work / 'build' / lib).resolve(strict=True)
     if not p.is_relative_to(work):
         paths.add(p)
 # A library named in the private loader's --list result may never fall back to host.
